@@ -208,11 +208,15 @@ final class AppSettings: ObservableObject {
         holdPhrase.map { "\($0) to dictate" } ?? "Set a dictation shortcut in Settings"
     }
 
-    // Terms the cleanup model should correct toward: dictionary + team member names. Always applied
-    // — an empty dictionary already means no biasing.
+    // Built-in terms, merged under the user's dictionary and never shown.
+    static let builtInWords = ["Bispr Blow", "BisprBlow", "Bluejay", "Claude", "Anthropic",
+                               "ChatGPT", "OpenAI", "GitHub", "Supabase"]
+
+    // Terms the cleanup model should correct toward: dictionary, team member names, then built-ins,
+    // so the user's casing wins.
     var vocabulary: [String] {
         var seen = Set<String>()
-        return (dictionary + teamMembers.map(\.name))
+        return (dictionary + teamMembers.map(\.name) + Self.builtInWords)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
     }
@@ -233,7 +237,7 @@ final class AppSettings: ObservableObject {
     private init() {
         cleanup = Cleanup(rawValue: defaults.string(forKey: "cleanup") ?? "") ?? .fast
         inputDeviceUID = defaults.string(forKey: "inputDeviceUID") ?? ""
-        dictionary = defaults.stringArray(forKey: "dictionary") ?? ["Bluejay"]
+        dictionary = defaults.stringArray(forKey: "dictionary") ?? []
         if let data = defaults.data(forKey: "teamMembers"),
            let saved = try? JSONDecoder().decode([TeamMember].self, from: data) {
             teamMembers = saved

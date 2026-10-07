@@ -329,26 +329,21 @@ struct SignInView: View {
                     .font(.bj(11.5))
                     .foregroundStyle(Theme.inkSubtle)
             }
-            // Hidden until the project actually has a Google client, because until then this is a
-            // button that cannot succeed (measured: "Unsupported provider: provider is not
-            // enabled"). Asked of the server, so enabling the provider in Supabase is the only step.
-            if cloud.googleEnabled {
-                HStack(spacing: 10) {
-                    Rectangle().fill(Theme.border.opacity(0.6)).frame(width: 34, height: 1)
-                    Text("or")
-                        .font(.bj(11))
-                        .foregroundStyle(Theme.inkTertiary)
-                    Rectangle().fill(Theme.border.opacity(0.6)).frame(width: 34, height: 1)
-                }
-                Button(action: google) {
-                    HStack(spacing: 7) {
-                        GoogleMark()
-                        Text("Continue with Google")
-                    }
-                }
-                .buttonStyle(CapsuleButtonStyle(filled: false))
-                .disabled(busy)
+            HStack(spacing: 10) {
+                Rectangle().fill(Theme.border.opacity(0.6)).frame(width: 34, height: 1)
+                Text("or")
+                    .font(.bj(11))
+                    .foregroundStyle(Theme.inkTertiary)
+                Rectangle().fill(Theme.border.opacity(0.6)).frame(width: 34, height: 1)
             }
+            Button(action: google) {
+                HStack(spacing: 7) {
+                    LogoView(name: "Google_G", size: 14)
+                    Text("Continue with Google")
+                }
+            }
+            .buttonStyle(CapsuleButtonStyle(filled: false))
+            .disabled(busy)
             if let note {
                 Text(note)
                     .font(.bj(11.5))
@@ -356,7 +351,6 @@ struct SignInView: View {
             }
         }
         .animation(.bjSoft, value: codeSent)
-        .task { await cloud.refreshProviders() }
     }
 
     private var trimmedEmail: String {
@@ -395,20 +389,4 @@ struct SignInView: View {
         }
     }
 
-}
-
-// Google's G, drawn rather than shipped as an asset: four fixed brand colours and a few paths, and
-// Google's guidelines require the mark unmodified, which a tinted SF Symbol would not be. These
-// hexes are Google's own and must not become palette tokens.
-private struct GoogleMark: View {
-    var body: some View {
-        ZStack {
-            Circle().fill(.white)
-            Text("G")
-                .font(.system(size: 10.5, weight: .bold, design: .default))
-                .foregroundStyle(Color(red: 0.259, green: 0.522, blue: 0.957))
-        }
-        .frame(width: 15, height: 15)
-        .overlay(Circle().stroke(Theme.border.opacity(0.5), lineWidth: 0.5))
-    }
 }

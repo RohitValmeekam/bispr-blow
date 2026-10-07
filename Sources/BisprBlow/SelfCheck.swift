@@ -94,6 +94,11 @@ enum SelfCheck {
                                                 vocabulary: ["git"]) == "i sent you a gift")
         precondition(LLMCleaner.applyVocabulary("hold shift and click",
                                                 vocabulary: ["Swift"]) == "hold shift and click")
+        let plain = "open the cloud doc, then blow it up and get the hub working"
+        precondition(LLMCleaner.applyVocabulary(plain, vocabulary: AppSettings.builtInWords) == plain)
+        precondition(LLMCleaner.applyVocabulary("ask claude in github",
+                                                vocabulary: AppSettings.builtInWords)
+                     == "ask Claude in GitHub")
         // The two-word join is an EXACT hit, so it must not license the phonetic tier next door. It
         // used to, and that one line corrupted 13 of 432 real dictations: "Says Blue Jay for all
         // six." went out as "git bluejay Vite all six."

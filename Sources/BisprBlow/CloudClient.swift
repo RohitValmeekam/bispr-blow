@@ -17,41 +17,6 @@ final class CloudClient: ObservableObject {
 
     // MARK: - Auth
 
-    // Whether the project has a Google client configured. The sign-in view hides its Google button
-    // until this is true, so the button can never be one that cannot succeed. Failing quietly to
-    // `false` is right: a hidden button is a smaller wrong than a broken one.
-    @Published private(set) var googleEnabled = false
-
-    // Quietly, but not silently. A project that no longer resolves and a project with Google
-    // switched off both end with the button missing, the UI rules keep transport state off the
-    // card, and this used to `return` on every failure, so nothing anywhere could tell the two
-    // apart. Measured: the shipped project went NXDOMAIN and it read as the provider being off.
-    func refreshProviders() async {
-        guard let base = CloudConfig.url else {
-            logLine("providers: no cloud URL configured")
-            return
-        }
-        var request = URLRequest(url: base.appendingPathComponent("auth/v1/settings"))
-        request.setValue(CloudConfig.anonKey, forHTTPHeaderField: "apikey")
-        let host = base.host ?? "?"
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            let status = (response as? HTTPURLResponse)?.statusCode
-            guard let status, 200..<300 ~= status,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let external = json["external"] as? [String: Any]
-            else {
-                logLine("providers: \(host) answered \(status.map(String.init) ?? "nothing") "
-                        + "without an 'external' block")
-                return
-            }
-            googleEnabled = external["google"] as? Bool ?? false
-            logLine("providers: google=\(googleEnabled)")
-        } catch {
-            logLine("providers: \(host) unreachable (\(error.localizedDescription))")
-        }
-    }
-
     // Step one of signing in: an email with a one-time code. `redirect_to` is for the LINK half of
     // that email, which we do not ask for and cannot stop: GoTrue's Magic Link template renders
     // `{{ .ConfirmationURL }}` unless the project's template is changed, and that resolves against
