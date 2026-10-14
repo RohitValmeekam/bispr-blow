@@ -122,6 +122,18 @@ extension SelfCheck {
 
         // A word with a digit or an underscore is a variable name, not a dictated word.
         precondition(LLMCleaner.learnable(misheard: "userId", corrected: "user_id") == false)
+
+        precondition(WisprImport.corrections(in: [
+            ("ask Devy about the deploy", "ask Devi about the deploy"),
+            ("The plan is fine.", "the plan is fine"),
+            ("ship it to prod", "ship it to proud"),
+        ]) == ["Devi"])
+        // A word that respells a dictation the user kept is not imported, nor one that only recases
+        // it: "linear" in someone's maths is not the company.
+        let harmless = WisprImport.harmless(["Devi", "Kubernetes"], vocabulary: [],
+                                            dictations: ["ask Devy about it", "Kubernetes is up"])
+        precondition(harmless == ["Kubernetes"], "\(harmless)")
+        precondition(WisprImport.harmless(["Linear"], vocabulary: [], dictations: ["a linear fit"]).isEmpty)
     }
 
     // The field's own name is context too, and it leads: in an empty message box it is all there is.
