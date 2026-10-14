@@ -13,6 +13,8 @@ struct SettingsView: View {
 
     @ObservedObject private var downloader = ModelDownloader.shared
     @State private var askToDownload = false
+    @State private var wisprImportResult: String?
+    @State private var isImportingWispr = false
 
     private let refresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
     private let cleaner = LLMCleaner()
@@ -148,6 +150,34 @@ struct SettingsView: View {
                           isOn: $settings.restoreMicVolume)
             }
 
+            // Only on a Mac that has Wispr Flow's data, for the same reason as Account below.
+            if WisprImport.isInstalled {
+                settingsGroup("Wispr Flow") {
+                    HStack(spacing: 12) {
+                        // Wispr Flow's own icon, read from the installed app, so the row is recognised
+                        // at a glance and nothing of Wispr Flow's is copied into this repo.
+                        if let icon = WisprImport.appIcon {
+                            Image(nsImage: icon)
+                                .resizable()
+                                .frame(width: 34, height: 34)
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Bring over what Wispr Flow learned")
+                                .font(.bj(13, weight: .medium))
+                                .foregroundStyle(Theme.ink)
+                            Text(wisprImportResult ?? "Your dictionary, and the names you corrected there.")
+                                .font(.bj(12))
+                                .foregroundStyle(Theme.inkSubtle)
+                        }
+                        Spacer(minLength: 12)
+                        Button(isImportingWispr ? "Importing…" : "Import", action: importFromWispr)
+                            .buttonStyle(CapsuleButtonStyle())
+                            .disabled(isImportingWispr)
+                    }
+                    .help("Reads Wispr Flow's data and leaves it as it is.")
+                }
+            }
+
             // Only in builds where a project is configured — an Account section that can never
             // sign in is a promise the app cannot keep.
             if CloudConfig.ready {
@@ -174,6 +204,26 @@ struct SettingsView: View {
             axTrusted = AXIsProcessTrusted()
             inputMonitoringGranted = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
             micName = AudioRecorder.defaultInputDeviceName()
+        }
+    }
+
+    // Off the main thread: every candidate is replayed over Wispr Flow's whole history.
+    private func importFromWispr() {
+        let vocabulary = settings.vocabulary
+        isImportingWispr = true
+        wisprImportResult = nil
+        Task {
+            let words = await Task.detached { WisprImport.learnedWords(alongside: vocabulary) }.value
+            isImportingWispr = false
+            let added = words.map { WisprImport.add($0, to: settings).count }
+            withAnimation(.bjSnap) {
+                wisprImportResult = switch added {
+                case nil: "Couldn't read Wispr Flow's data"
+                case 0?: "Nothing new to add"
+                case 1?: "Added 1 word"
+                case let count?: "Added \(count) words"
+                }
+            }
         }
     }
 

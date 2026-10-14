@@ -239,6 +239,16 @@ enum Main {
             RunLoop.main.run()
             return
         }
+        // Quit the app first: a running app holds its own copy of the dictionary and saves it over
+        // whatever this adds.
+        if CommandLine.arguments.contains("--import-wispr") {
+            guard let words = WisprImport.learnedWords(alongside: AppSettings.shared.vocabulary) else {
+                print("could not read \(WisprImport.database.path)")
+                exit(1)
+            }
+            for word in WisprImport.add(words, to: .shared) { print(word) }
+            return
+        }
         // Every model on disk, one id per line, so bench/bench.py can enumerate the in-process
         // engine the same way it enumerates LM Studio's /models.
         if CommandLine.arguments.contains("--list-models") {
