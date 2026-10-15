@@ -123,6 +123,15 @@ extension SelfCheck {
         // A word with a digit or an underscore is a variable name, not a dictated word.
         precondition(LLMCleaner.learnable(misheard: "userId", corrected: "user_id") == false)
 
+        // Up to three words for up to three words, so a name split or joined is learned too.
+        let joined = fix("we use live kit here", "we use LiveKit here")
+        precondition(joined?.misheard == "live kit" && joined?.corrected == "LiveKit")
+        precondition(joined.map(LLMCleaner.learnedWords(from:)) == ["LiveKit"])
+        // A stretch that grew into other words is the user rewriting, and teaches nothing.
+        let rewrite = fix("send it to finance", "send it to the accountants")
+        precondition(rewrite.map(LLMCleaner.learnedWords(from:)) == [])
+        precondition(fix("meet me at noon", "meet you at dawn") == nil)
+
         precondition(WisprImport.corrections(in: [
             ("ask Devy about the deploy", "ask Devi about the deploy"),
             ("The plan is fine.", "the plan is fine"),
@@ -130,10 +139,10 @@ extension SelfCheck {
         ]) == ["Devi"])
         // A word that respells a dictation the user kept is not imported, nor one that only recases
         // it: "linear" in someone's maths is not the company.
-        let harmless = WisprImport.harmless(["Devi", "Kubernetes"], vocabulary: [],
+        let harmless = LLMCleaner.harmless(["Devi", "Kubernetes"], vocabulary: [],
                                             dictations: ["ask Devy about it", "Kubernetes is up"])
         precondition(harmless == ["Kubernetes"], "\(harmless)")
-        precondition(WisprImport.harmless(["Linear"], vocabulary: [], dictations: ["a linear fit"]).isEmpty)
+        precondition(LLMCleaner.harmless(["Linear"], vocabulary: [], dictations: ["a linear fit"]).isEmpty)
     }
 
     // The field's own name is context too, and it leads: in an empty message box it is all there is.
