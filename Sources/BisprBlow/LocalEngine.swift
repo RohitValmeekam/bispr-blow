@@ -98,8 +98,9 @@ actor LocalEngine {
         let started = Date()
         // `context` has to hold the static prefix plus the transcript plus the reply. The low-touch
         // prefix alone carries a 202-word demonstration and dictations run 200-300 words, so the
-        // 2048 default would silently truncate the prompt. 8192 holds the ~1378-token prefix plus a
-        // 300-word dictation plus the reply with room to spare.
+        // 2048 default would silently truncate the prompt. 4096 holds the ~1378-token prefix plus the
+        // longest dictation in 7,018 real ones (759 words) plus its reply. 8192 did too, but the KV
+        // cache is reserved up front, so it cost ~900 MB resident for room nothing used.
         // WISPR_LLAMA_VERBOSE=1 makes llama.cpp print its backend and layer offload counts: whether
         // the model is on the GPU or silently on the CPU is invisible from latency alone.
         // penaltyRepeat defaults to 1.1, which punishes echoing recent tokens — backwards for
@@ -109,7 +110,7 @@ actor LocalEngine {
             client = .llama(try await LocalLLMClient.llama(
                 url: model.url,
                 parameter: .init(
-                    context: 8192, temperature: 0.2, penaltyRepeat: 1.0,
+                    context: 4096, temperature: 0.2, penaltyRepeat: 1.0,
                     options: .init(verbose: ProcessInfo.processInfo.environment["WISPR_LLAMA_VERBOSE"] != nil))))
         } else {
             client = .mlx(try await LocalLLMClient.mlx(
