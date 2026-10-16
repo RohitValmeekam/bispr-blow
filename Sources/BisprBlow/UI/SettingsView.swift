@@ -117,6 +117,9 @@ struct SettingsView: View {
                 ToggleRow("Play a sound when dictation starts and ends",
                           help: "A click when the mic opens and one when the text lands.",
                           isOn: $settings.soundsEnabled)
+                ToggleRow("Voice commands",
+                          help: "Hold your Voice command shortcut and say what to do, like \"open my DMs\" or \"create a new issue\". What you said, the names and text of the buttons, fields and menus in the app in front, and the names of your open apps are sent to TypeSafe to pick which one you mean. Anything like delete, send or pay asks you first.",
+                          isOn: $settings.voiceCommands)
                 ToggleRow("Tell me when there's a new version",
                           help: "Asks GitHub once at launch whether a newer release is out, and shows a line on Home if there is. Nothing is downloaded or installed for you, and nothing about you is sent.",
                           isOn: $settings.checkForUpdates)

@@ -145,6 +145,14 @@ extension SelfCheck {
         precondition(LLMCleaner.harmless(["Linear"], vocabulary: [], dictations: ["a linear fit"]).isEmpty)
     }
 
+    // A voice command types only what follows the verb, and naming a field types nothing into it.
+    static func checkVoiceCommands() {
+        precondition(VoiceCommand.textToType(in: "type looks good to me, ship it.") == "looks good to me, ship it")
+        precondition(VoiceCommand.textToType(in: "Search Slack for metronome") == "metronome")
+        precondition(VoiceCommand.textToType(in: "click into the message box") == nil)
+        precondition(VoiceCommand.textToType(in: "open the typescript file") == nil)
+    }
+
     // The field's own name is context too, and it leads: in an empty message box it is all there is.
     static func checkFieldLabel() {
         let terms = AppContext(
