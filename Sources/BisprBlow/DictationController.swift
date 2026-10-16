@@ -122,6 +122,8 @@ final class DictationController: ObservableObject {
 
     private func beginRecording(sendEnter: Bool) {
         guard state == .idle else { return }
+        // Speaking again means the last dictation's edits are done, before this one's text can land beside them.
+        CorrectionWatcher.cancel()
         ActivationTrace.mark("onStart")
         sessionGeneration += 1
         self.sendEnter = sendEnter
@@ -286,16 +288,28 @@ final class DictationController: ObservableObject {
 
     // A word the user fixed by hand goes into the dictionary, so the next dictation spells it their
     // way. Said out loud on the pill with the way back attached: this changes a setting the user
-    // owns, and doing that silently is how a dictionary starts respelling good words.
+    // owns, and doing that silently is how a dictionary starts respelling good words. Replayed over
+    // history first for the same reason; the dictations still holding the mishear are the ones the
+    // fix is for, so they are not evidence against it.
     private func watchForCorrection(to inserted: String) {
         CorrectionWatcher.watch(inserted: inserted) { [weak self] fix in
             let settings = AppSettings.shared
-            guard !settings.dictionary.contains(fix.corrected) else { return }
-            settings.addDictionaryWords([fix.corrected])
-            self?.showNotice("Added \"\(fix.corrected)\" to your dictionary", for: 6,
-                             action: ("Undo", {
-                                 settings.dictionary.removeAll { $0 == fix.corrected }
-                             }))
+            let vocabulary = settings.vocabulary
+            let known = Set(vocabulary.map { $0.lowercased() })
+            let words = LLMCleaner.learnedWords(from: fix).filter { !known.contains($0.lowercased()) }
+            guard !words.isEmpty else { return }
+            let history = HistoryStore.shared.entries.map(\.cleaned)
+                .filter { !$0.localizedCaseInsensitiveContains(fix.misheard) }
+            Task {
+                let safe = await Task.detached {
+                    LLMCleaner.harmless(words, vocabulary: vocabulary, dictations: history)
+                }.value
+                logLine("correction learned=\(safe.count) skipped=\(words.count - safe.count)")
+                guard !safe.isEmpty else { return }
+                settings.addDictionaryWords(safe)
+                self?.showNotice("Added \(safe.map { "\"\($0)\"" }.joined(separator: ", ")) to your dictionary", for: 6,
+                                 action: ("Undo", { settings.dictionary.removeAll { safe.contains($0) } }))
+            }
         }
     }
 
