@@ -252,8 +252,8 @@ enum JayDecide {
     }
 
     private static let intentDefinitions: [JayIntent: String] = [
-        .act: "Do one thing now: press, open, scroll, type into a field, or a shortcut.",
-        .task: "Reach a goal that takes several actions on screen, one after another.",
+        .act: "Do one thing now: press, open, scroll, type into a field, or a shortcut. Includes pressing one visible button that itself does what was asked, even when that button starts a bigger job.",
+        .task: "Reach a goal that takes several actions on screen, one after another, because no single visible control does it.",
         .dictate: "Write the user's words as text at the cursor.",
         .stop: "Stop what the assistant itself is doing. Never a command for the app, such as killing, closing or stopping a terminal, timer or recording.",
         .undo: "Undo the last action.",
@@ -365,7 +365,8 @@ enum JayDecide {
     // A field types where a button of the same name only presses, so the two never share a group.
     static func group(of element: ScreenElement) -> String {
         if let shortcut = element.shortcut { return "keys:" + shortcut }
-        return (element.kind == .field ? "field:" : "name:") + normalized(plainName(element.label))
+        let kind = element.kind == .field ? "field:" : element.detail.contains(ScreenElements.revealsWhat) ? "reveals:" : "name:"
+        return kind + normalized(plainName(element.label))
     }
 
     static func group(of action: SystemAction) -> String {

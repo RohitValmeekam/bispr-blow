@@ -2,6 +2,11 @@ import Foundation
 
 extension SelfCheck {
     static func checkJayDecide() {
+        // A section header and the page link it reveals share a name but never a vote: pressing the header navigates nowhere.
+        let header = ScreenElement(label: "Simulations (button)", kind: .press, role: "web:button", detail: "button in the navigation. closes this open \(ScreenElements.revealsWhat)",
+                                   context: "", shortcut: nil, frame: nil)
+        let link = ScreenElement(label: "Simulations (link)", kind: .press, role: "web:link", detail: "link in the navigation", context: "", shortcut: nil, frame: nil)
+        precondition(JayDecide.group(of: header) != JayDecide.group(of: link))
         // Jev leans toward the first option, so the order we write must survive serialization.
         let bodyData = Jev.body(state: [("app", "Mail")], questions: [
             Jev.Question(name: "q", type: .choice, instructions: "pick", criteria: [("b", nil), ("a", "the first letter")]),

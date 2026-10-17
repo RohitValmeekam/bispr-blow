@@ -264,7 +264,13 @@ enum Main {
             guard let app = byPID ?? running.first(where: { windowOwners.contains($0.processIdentifier) })
                     ?? running.first(where: { $0.activationPolicy == .regular }) ?? running.first else { exit(1) }
             let started = Date()
-            let snapshot = awaitSync { await ScreenElements.snapshot(app: app) }
+            var snapshot = awaitSync { await ScreenElements.snapshot(app: app) }
+            // The first Chrome read only starts the DevTools connection; Chrome then asks the user to allow it,
+            // so keep reading until it is allowed or the consent window closes.
+            for _ in 0..<35 where ChromeDevTools.isEnabled && bundleID == "com.google.Chrome" && snapshot.source != .chrome {
+                Thread.sleep(forTimeInterval: 1)
+                snapshot = awaitSync { await ScreenElements.snapshot(app: app) }
+            }
             let dump = ScreenDump(trusted: AXIsProcessTrusted(), ms: Int(Date().timeIntervalSince(started) * 1000), snapshot: snapshot)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

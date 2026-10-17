@@ -165,6 +165,9 @@ enum ScreenElements {
         return glyphs + (keyGlyphs[cmdChar] ?? cmdChar.uppercased())
     }
 
+    // What a menu button or section header reveals; such a control is never the page its name points to.
+    static let revealsWhat = "menu or section"
+
     static func detail(roleDescription: String, place: String?, help: String?, shortcut: String?, states: [String]) -> String {
         let head = [roleDescription, place ?? ""].filter { !$0.isEmpty }.joined(separator: " in ")
         let helpText = help?.trimmingCharacters(in: CharacterSet(charactersIn: ". ").union(.whitespacesAndNewlines))

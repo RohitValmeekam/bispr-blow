@@ -46,7 +46,9 @@ actor ChromeDevTools {
             guard let name = (row["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else { return nil }
             let role = row["role"] as? String ?? "button"
             let roleDescription = webRoleDescriptions[role] ?? role
-            let states = row["selected"] as? Bool == true ? [role == "checkbox" ? "checked" : "selected"] : []
+            // A section header or menu button shares its name with the page link it reveals, and pressing it navigates nowhere.
+            let folding = ["true": "closes this open \(ScreenElements.revealsWhat)", "false": "opens a \(ScreenElements.revealsWhat)"][row["expanded"] as? String ?? ""]
+            let states = (row["selected"] as? Bool == true ? [role == "checkbox" ? "checked" : "selected"] : []) + [folding].compactMap { $0 }
             return ScreenElement(
                 label: "\(name.prefix(ScreenElements.labelLimit)) (\(roleDescription))",
                 kind: row["kind"] as? String == "field" ? .field : .press,
@@ -302,6 +304,7 @@ actor ChromeDevTools {
           risk: isField(node) ? '' : [node.innerText, node.tagName === 'INPUT' ? node.value : '', node.getAttribute('aria-label'), title]
             .map(clean).join(' '),
           x: box.left, y: box.top, w: box.width, h: box.height,
+          expanded: node.getAttribute('aria-expanded'),
           selected: node.getAttribute('aria-selected') === 'true' || node.getAttribute('aria-pressed') === 'true'
             || (current !== null && current !== 'false') || node.checked === true,
         });
