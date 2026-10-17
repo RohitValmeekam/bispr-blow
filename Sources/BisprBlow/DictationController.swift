@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import Combine
 import IOKit.hidsystem
 import Speech
 
@@ -12,7 +13,9 @@ final class DictationController: ObservableObject {
         case processing
     }
 
-    @Published private(set) var state: State = .idle
+    @Published private(set) var state: State = .idle {
+        didSet { if state == .idle { updateJayListening() } }
+    }
     @Published private(set) var level: Float = 0
     @Published private(set) var partialText = ""
     @Published private(set) var lastError: String?
@@ -39,38 +42,44 @@ final class DictationController: ObservableObject {
     private var sessionGeneration = 0
     // Set by the "dictate and send" binding: press Return once the text is in.
     private var sendEnter = false
-    // A voice-command session runs what was said each time the speaker pauses, so a held press runs
-    // one command and a double-tapped one stays on and keeps acting until it is tapped off.
-    private var isCommand = false
-    // Settled words not yet run, and whether any arrived: the SFSpeechRecognizer fallback never
-    // settles anything mid-session, so its whole transcript runs at release instead.
-    private var commandPending = ""
-    private var commandSettledAny = false
-    private var commandSnapshot = ""
-    private var commandHeardAt = Date()
-    private var commandPauseTimer: Timer?
-    private var commandQueue: Task<Void, Never>?
-    // Bumped by Esc and by every new session; a queued command checks it before each step, since
-    // cancelling the newest Task does not reach the ones it is waiting behind.
-    private var commandEpoch = 0
-    private static let commandPause: TimeInterval = 0.8
+
+    // Jay listens through its own recognizer session, so a dictation can start while it is listening.
+    // Either always on (Jay mode, wake phrase first) or for as long as the Voice command shortcut is
+    // held or locked on.
+    private let jayTranscriber = Transcriber()
+    private lazy var jay = JayController(host: self)
+    private var hasStarted = false
+    private var isJayListening = false
+    private var isJayAsleep = false
+    private var isCommandSession = false
+    // Bumped by every open and close of the Jay session, so an open still starting up stands down
+    // when a close was asked for after it.
+    private var jayGeneration = 0
+    // Whether the open session reached the mic. Finishing a recognizer that was never fed never
+    // returns, and every later open and close waits behind it.
+    private var isJayCapturing = false
+    // Opens, closes and finishes of the Jay session, run in order: a cancel still unwinding must not
+    // tear down the session started after it.
+    private var jayAudio: Task<Void, Never>?
+    private var settingsObserver: AnyCancellable?
 
     func start() {
-        transcriber.onPartial = { [weak self] text in
-            guard let self else { return }
-            partialText = text
-            // Settling repeats the same words; only new words mean the speaker is still talking.
-            if isCommand, text != commandSnapshot {
-                commandSnapshot = text
-                commandHeardAt = Date()
+        hasStarted = true
+        transcriber.onPartial = { [weak self] text in self?.partialText = text }
+        jayTranscriber.onPartial = { [weak self] text in self?.jay.hear(text) }
+        settingsObserver = AppSettings.shared.$voiceCommands.combineLatest(AppSettings.shared.$jayMode)
+            .dropFirst()
+            // @Published fires before the value is stored; the hop lets the new value land first.
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.isJayAsleep = false
+                    self?.watchScreenIfNeeded()
+                    self?.updateJayListening()
+                }
             }
-        }
-        transcriber.onFinal = { [weak self] settled in
-            guard let self, isCommand, !settled.isEmpty else { return }
-            // Settled chunks arrive trimmed, so "go to" and "LinkedIn" need their space put back.
-            commandPending += commandPending.isEmpty ? settled : " " + settled
-            commandSettledAny = true
-        }
+        watchScreenIfNeeded()
+        updateJayListening()
         monitor.onStart = { [weak self] action in
             Task { @MainActor in self?.beginRecording(action) }
         }
@@ -80,6 +89,7 @@ final class DictationController: ObservableObject {
         monitor.onCancel = { [weak self] in
             Task { @MainActor in self?.cancelRecording() }
         }
+        monitor.hasWorkToCancel = { [weak self] in MainActor.assumeIsolated { self?.jay.isBusy ?? false } }
         monitor.onLock = { [weak self] in
             Task { @MainActor in self?.noteLocked() }
         }
@@ -135,8 +145,8 @@ final class DictationController: ObservableObject {
         monitor.beginLockedSession()
     }
 
-    private func showNotice(_ message: String, for seconds: TimeInterval = 4,
-                           action: (label: String, run: () -> Void)? = nil) {
+    func showNotice(_ message: String, for seconds: TimeInterval = 4,
+                    action: (label: String, run: () -> Void)? = nil) {
         notice = message
         noticeAction = action
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
@@ -149,23 +159,18 @@ final class DictationController: ObservableObject {
 
     private func beginRecording(_ action: ShortcutAction) {
         guard state == .idle else { return }
+        if action == .command, !AppSettings.shared.voiceCommands {
+            showNotice("Turn on Voice commands in Settings")
+            return
+        }
         // Speaking again means the last dictation's edits are done, before this one's text can land beside them.
         CorrectionWatcher.cancel()
         ActivationTrace.mark("onStart")
+        if isJayListening { stopJayListening() }
         sessionGeneration += 1
         sendEnter = action == .pressEnter
-        isCommand = action == .command
-        if isCommand {
-            commandPending = ""
-            commandSettledAny = false
-            commandSnapshot = ""
-            commandHeardAt = Date()
-            commandEpoch += 1
-            commandPauseTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.runCommandIfPaused() }
-            }
-        }
-        capturedContext = ContextDetector.current()
+        isCommandSession = action == .command
+        capturedContext = isCommandSession ? nil : ContextDetector.current()
         let device = AudioRecorder.currentInputDeviceName()
         if device != UserDefaults.standard.string(forKey: "lastMicName") {
             UserDefaults.standard.set(device, forKey: "lastMicName")
@@ -184,6 +189,13 @@ final class DictationController: ObservableObject {
 
         recorder.onLevel = { [weak self] level in
             DispatchQueue.main.async { self?.level = level }
+        }
+        if isCommandSession {
+            isJayAsleep = false
+            ScreenWatcher.shared.prefetch()
+            jay.beginListening(requiresWake: false)
+            openJaySession()
+            return
         }
         recorder.onBuffer = { [weak self] buffer in
             self?.transcriber.feed(buffer)
@@ -208,7 +220,6 @@ final class DictationController: ObservableObject {
                 try recorder.start()
             } catch {
                 self.lastError = "Microphone unavailable: \(error.localizedDescription)"
-                self.endCommandSession(runningRestOf: nil)
                 self.state = .idle
                 return
             }
@@ -231,85 +242,78 @@ final class DictationController: ObservableObject {
         // left the pill spinning until the app was force-quit. Silence is a failure the user has to
         // be told about.
         guard recorder.capturedFrames > 0 else {
-            endCommandSession(runningRestOf: nil)
             logLine("dictation discarded: no audio captured")
             sessionGeneration += 1
-            Task { await transcriber.cancelSession() }
+            if isCommandSession { endCommandSession() } else { Task { await transcriber.cancelSession() } }
             showNotice("No audio from \(AudioRecorder.currentInputDeviceName())")
             state = .idle
             partialText = ""
             sendEnter = false
             return
         }
+        if isCommandSession {
+            finishCommandSession()
+            return
+        }
 
         let context = capturedContext ?? ContextDetector.current()
         let generation = sessionGeneration
-        // Captured now: Esc while this finalizes ends the session, and must not turn a command into typed text.
-        let wasCommand = isCommand
         Task {
             let released = Date()
             let raw = await transcriber.finishSession()
-            let transcribeMs = Date().timeIntervalSince(released) * 1000
+            let transcribeMs = Int(Date().timeIntervalSince(released) * 1000)
             guard self.sessionGeneration == generation else { return }
-            if wasCommand {
-                self.endCommandSession(runningRestOf: raw)
-                await self.commandQueue?.value
-                self.state = .idle
-                self.partialText = ""
-                return
-            }
-            guard !raw.isEmpty else {
-                self.state = .idle
-                self.partialText = ""
-                return
-            }
-            let llmStart = Date()
-            let (cleaned, provider) = await self.cleaner.clean(raw, context: context)
-            let llmMs = Date().timeIntervalSince(llmStart) * 1000
-            logLine("""
-                timings transcribe=\(Int(transcribeMs))ms llm=\(Int(llmMs))ms \
-                spoke=\(Int(duration * 1000))ms provider=\(provider) \
-                words=\(cleaned.split(separator: " ").count)
-                """)
-            guard self.sessionGeneration == generation else { return }
-            if !cleaned.isEmpty {
-                Self.playSound(Self.endSound)
-                if TextInserter.insert(cleaned, thenReturn: self.sendEnter) {
-                    self.watchForCorrection(to: cleaned)
-                } else {
-                    self.showNotice("Copied. Press ⌘V to paste")
-                }
-                self.history.add(DictationEntry(
-                    id: UUID(),
-                    date: Date(),
-                    raw: raw,
-                    cleaned: cleaned,
-                    appName: context.appName,
-                    bundleID: context.bundleID,
-                    provider: provider,
-                    durationSeconds: duration
-                ))
-            }
+            await self.insertDictation(raw: raw, context: context, duration: duration, transcribeMs: transcribeMs)
             self.state = .idle
             self.partialText = ""
             self.sendEnter = false
         }
     }
 
+    // Cleans what was said and puts it at the cursor: the end of every dictation, and of each
+    // utterance while Jay is in dictate mode.
+    func insertDictation(raw: String, context: AppContext, duration: TimeInterval, transcribeMs: Int = 0) async {
+        guard !raw.isEmpty else { return }
+        let generation = sessionGeneration
+        let llmStart = Date()
+        let (cleaned, provider) = await cleaner.clean(raw, context: context)
+        let llmMs = Date().timeIntervalSince(llmStart) * 1000
+        logLine("""
+            timings transcribe=\(transcribeMs)ms llm=\(Int(llmMs))ms \
+            spoke=\(Int(duration * 1000))ms provider=\(provider) \
+            words=\(cleaned.split(separator: " ").count)
+            """)
+        guard sessionGeneration == generation, !cleaned.isEmpty else { return }
+        Self.playSound(Self.endSound)
+        if TextInserter.insert(cleaned, thenReturn: sendEnter) {
+            watchForCorrection(to: cleaned)
+        } else {
+            showNotice("Copied. Press ⌘V to paste")
+        }
+        history.add(DictationEntry(
+            id: UUID(),
+            date: Date(),
+            raw: raw,
+            cleaned: cleaned,
+            appName: context.appName,
+            bundleID: context.bundleID,
+            provider: provider,
+            durationSeconds: duration
+        ))
+    }
+
     private func cancelRecording() {
         CorrectionWatcher.cancel()
-        // Esc stops a command session outright, including commands heard but not yet run.
-        commandEpoch += 1
-        commandQueue?.cancel()
-        endCommandSession(runningRestOf: nil)
+        // Esc stops Jay outright, including commands heard but not yet run.
+        jay.stop()
         guard case .recording = state else { return }
         sessionGeneration += 1
         recorder.stop()
+        if isCommandSession { endCommandSession() } else { Task { await transcriber.cancelSession() } }
         level = 0
         sendEnter = false
         partialText = ""
         state = .idle
-        Task { await transcriber.cancelSession() }
     }
 
     // One cue when the mic opens, one when the text lands. Fire and forget: a sound that waits on
@@ -366,96 +370,109 @@ final class DictationController: ObservableObject {
         }
     }
 
-    private func runCommandIfPaused() {
-        guard Date().timeIntervalSince(commandHeardAt) >= Self.commandPause,
-              !VoiceCommand.isUnfinished(commandPending) else { return }
-        queueCommand(commandPending)
-        commandPending = ""
-    }
+    // MARK: - Jay
 
-    private func queueCommand(_ said: String) {
-        let said = VoiceCommand.withoutLeadingJoint(said)
-        guard !said.isEmpty else { return }
-        let previous = commandQueue, epoch = commandEpoch
-        commandQueue = Task { [weak self] in
-            await previous?.value
-            await self?.runCommand(said, epoch: epoch)
-        }
-    }
-
-    // Release runs whatever has settled since the last pause; the fallback recognizer, which
-    // settles nothing early, hands over its whole transcript here.
-    private func endCommandSession(runningRestOf heard: String?) {
-        commandPauseTimer?.invalidate()
-        commandPauseTimer = nil
-        if isCommand, let heard { queueCommand(commandSettledAny ? commandPending : heard) }
-        commandPending = ""
-        isCommand = false
-    }
-
-    // The front app's screen is read, one element in it is acted on, and anything Jev is unsure of
-    // is asked about rather than done. Labels stay out of the log: they are someone's screen.
-    private func runCommand(_ spoken: String, epoch: Int) async {
+    private func watchScreenIfNeeded() {
         guard AppSettings.shared.voiceCommands else {
-            showNotice("Turn on Voice commands in Settings")
+            ScreenWatcher.shared.stop()
             return
         }
-        for (index, step) in VoiceCommand.steps(in: spoken).enumerated() {
-            // The last step changed the screen; the app needs a beat to draw it before it is read again.
-            if index > 0 { try? await Task.sleep(for: .milliseconds(400)) }
-            guard epoch == commandEpoch, let app = NSWorkspace.shared.frontmostApplication,
-                  await runStep(step, in: app, epoch: epoch)
-            else { return }
+        ScreenWatcher.shared.start()
+        // The first scan reads every bundle in the app folders; done now, the first command does not wait on it.
+        Task.detached(priority: .utility) { _ = InstalledApps.all() }
+    }
+
+    // Always-on listening holds the mic, so it runs only while nothing else needs it.
+    private func updateJayListening() {
+        let settings = AppSettings.shared
+        let shouldListen = hasStarted && settings.voiceCommands && settings.jayMode && !isJayAsleep && state == .idle
+        if shouldListen, !isJayListening { startJayListening() }
+        if !shouldListen, isJayListening { stopJayListening() }
+    }
+
+    private func startJayListening() {
+        isJayListening = true
+        recorder.onLevel = nil
+        jay.beginListening(requiresWake: true)
+        openJaySession()
+    }
+
+    private func stopJayListening() {
+        isJayListening = false
+        jay.endListening()
+        closeJaySession()
+    }
+
+    // "Jay sleep": the mic goes off until the Voice command shortcut is used or the switch flips.
+    func sleepJay() {
+        isJayAsleep = true
+        updateJayListening()
+        showNotice("Jay is asleep. Use the Voice command shortcut to wake it")
+    }
+
+    func recycleJaySession() {
+        guard isJayListening else { return }
+        closeJaySession()
+        openJaySession()
+    }
+
+    private func openJaySession() {
+        jayGeneration += 1
+        let generation = jayGeneration
+        recorder.onBuffer = { [jayTranscriber] buffer in jayTranscriber.feed(buffer) }
+        runJayAudio { [self] in
+            await jayTranscriber.startSession(contextTerms: JayListener.wakeTerms)
+            guard generation == jayGeneration else { return }
+            do {
+                try recorder.start()
+                isJayCapturing = true
+            } catch {
+                logLine("jay listening stopped: microphone unavailable")
+                lastError = "Microphone unavailable: \(error.localizedDescription)"
+                jay.endListening()
+                isJayListening = false
+                if isCommandSession {
+                    isCommandSession = false
+                    state = .idle
+                }
+            }
         }
     }
 
-    // True when the step was done; false when it was asked about or failed, which ends the chain.
-    private func runStep(_ spoken: String, in app: NSRunningApplication, epoch: Int) async -> Bool {
-        let readStarted = Date()
-        let elements = await Task.detached { ScreenElements.read(app: app) }.value
-        guard epoch == commandEpoch else { return false }
-        let readMs = Int(Date().timeIntervalSince(readStarted) * 1000)
-        if let target = VoiceCommand.appNamed(in: spoken, among: elements) {
-            logLine("command app-switch read=\(readMs)ms")
-            guard VoiceCommand.perform(target, spoken: spoken) else {
-                showNotice("Couldn't switch to \(target.label)")
-                return false
-            }
-            return true
+    private func closeJaySession() {
+        jayGeneration += 1
+        isJayCapturing = false
+        recorder.stop()
+        runJayAudio { [jayTranscriber] in await jayTranscriber.cancelSession() }
+    }
+
+    private func runJayAudio(_ work: @escaping @MainActor () async -> Void) {
+        let previous = jayAudio
+        jayAudio = Task {
+            await previous?.value
+            await work()
         }
-        do {
-            let pickStarted = Date()
-            let pick = try await VoiceCommand.pick(spoken, among: elements, appName: app.localizedName ?? "the app in front")
-            guard epoch == commandEpoch else { return false }
-            logLine("command read=\(readMs)ms jev=\(Int(Date().timeIntervalSince(pickStarted) * 1000))ms choices=\(elements.count) confidence=\(pick.confidence)")
-            guard pick.confidence >= VoiceCommand.confidentEnough, !VoiceCommand.needsConfirmation(pick.element) else {
-                let pid = app.processIdentifier
-                showNotice("\(pick.confidence >= VoiceCommand.confidentEnough ? "Press" : "Did you mean") \(pick.element.label)?", for: 8,
-                           action: ("Do it", { [weak self] in
-                               // The element belongs to the app the command was said in; elsewhere it presses nothing sensible.
-                               guard epoch == self?.commandEpoch,
-                                     NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
-                                     VoiceCommand.perform(pick.element, spoken: spoken)
-                               else { self?.showNotice("Couldn't do that: \(pick.element.label)"); return }
-                           }))
-                return false
-            }
-            guard VoiceCommand.perform(pick.element, spoken: spoken) else {
-                showNotice("Couldn't do that: \(pick.element.label)")
-                return false
-            }
-            return true
-        } catch VoiceCommand.Failure.noKey {
-            showNotice("Voice commands need a TypeSafe key in your Keychain")
-        } catch VoiceCommand.Failure.keyRejected {
-            showNotice("TypeSafe rejected the key in your Keychain")
-        } catch {
-            // Esc cancels the request in flight; that is the user stopping, not Jev failing.
-            guard epoch == commandEpoch else { return false }
-            logLine("command failed error=\(error.localizedDescription)")
-            showNotice("Couldn't reach Jev")
+    }
+
+    // The shortcut was let go (or tapped off): whatever was said since the last pause runs now.
+    private func finishCommandSession() {
+        isCommandSession = false
+        jayGeneration += 1
+        let epoch = jay.epoch
+        runJayAudio { [self] in
+            var heard = ""
+            if isJayCapturing { heard = await jayTranscriber.finishSession() } else { await jayTranscriber.cancelSession() }
+            isJayCapturing = false
+            // Esc while this finalizes ends the session, and must not run the rest of it.
+            if jay.epoch == epoch { jay.finishListening(heard: heard) } else { jay.endListening() }
+            if state == .processing { state = .idle }
         }
-        return false
+    }
+
+    private func endCommandSession() {
+        isCommandSession = false
+        jay.endListening()
+        closeJaySession()
     }
 
     // MARK: - Permissions
