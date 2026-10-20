@@ -45,7 +45,11 @@ enum Raindrop {
     }
 
     private static func post(_ path: String, _ body: [[String: Any]]) {
-        guard let key = writeKey(), let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+        guard let key = writeKey() else {
+            logLine("raindrop skipped path=\(path) reason=no write key")
+            return
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
         var request = URLRequest(url: base.appendingPathComponent(path))
         request.httpMethod = "POST"
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
@@ -57,7 +61,10 @@ enum Raindrop {
             for attempt in 1...attempts {
                 if let (_, response) = try? await URLSession.shared.data(for: request),
                    let status = (response as? HTTPURLResponse)?.statusCode {
-                    if (200..<300).contains(status) { return }
+                    if (200..<300).contains(status) {
+                        logLine("raindrop sent path=\(path) status=\(status)")
+                        return
+                    }
                     logLine("raindrop rejected path=\(path) status=\(status)")
                     if status < 500 { return }
                 }
