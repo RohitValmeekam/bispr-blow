@@ -10,10 +10,11 @@ extension SelfCheck {
                      == CGRect(x: 10, y: 940, width: 30, height: 40))
 
         let inbox = ScreenFingerprint(bundleID: "com.apple.mail", windowTitle: "Inbox", windowCount: 1, focusedRole: "AXTextArea",
-                                      focusedTitle: "", focusedValueLength: 0, url: nil, childCount: 12)
+                                      focusedTitle: "", focusedValueLength: 0, url: nil, childCount: 12, textDigest: 0)
         precondition(!JayExecutor.didChange(inbox, inbox))
         precondition(JayExecutor.didChange(inbox, changedFingerprint(inbox, windowTitle: "Sent")))
         precondition(JayExecutor.didChange(inbox, changedFingerprint(inbox, focusedValueLength: 5)))
+        precondition(JayExecutor.didChange(inbox, changedFingerprint(inbox, textDigest: 1)))
 
         let delete = ScreenElement(label: "Delete (button)", kind: .press, role: "AXButton", detail: "button in the toolbar",
                                    context: "", shortcut: nil, frame: nil)
@@ -42,9 +43,11 @@ extension SelfCheck {
         precondition(JayExecutor.mediaKeyData(16, isDown: true) == (16 << 16) | (0xA << 8))
     }
 
-    private static func changedFingerprint(_ base: ScreenFingerprint, windowTitle: String? = nil, focusedValueLength: Int? = nil) -> ScreenFingerprint {
+    private static func changedFingerprint(_ base: ScreenFingerprint, windowTitle: String? = nil, focusedValueLength: Int? = nil,
+                                           textDigest: Int? = nil) -> ScreenFingerprint {
         ScreenFingerprint(bundleID: base.bundleID, windowTitle: windowTitle ?? base.windowTitle, windowCount: base.windowCount,
                           focusedRole: base.focusedRole, focusedTitle: base.focusedTitle,
-                          focusedValueLength: focusedValueLength ?? base.focusedValueLength, url: base.url, childCount: base.childCount)
+                          focusedValueLength: focusedValueLength ?? base.focusedValueLength, url: base.url, childCount: base.childCount,
+                          textDigest: textDigest ?? base.textDigest)
     }
 }

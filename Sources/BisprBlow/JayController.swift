@@ -147,7 +147,9 @@ final class JayController {
     }
 
     // Jev starts on the words heard so far; the decision is used only if the settled words are the same.
-    private func speculate(_ text: String) {
+    private func speculate(_ heard: String) {
+        // the same words `run` will decide on, or the speculation never matches its step
+        let text = VoiceCommand.withoutLeadIn(heard)
         guard runningCommands == 0, choice == nil, confirmation == nil, VoiceCommand.steps(in: text).count == 1
         else { return }
         dropSpeculation()
@@ -208,7 +210,7 @@ final class JayController {
     private func run(_ text: String, heardAt: TimeInterval) async {
         let epoch = self.epoch
         var result = StepResult.done
-        for (index, step) in VoiceCommand.steps(in: VoiceCommand.withoutLeadingJoint(text)).enumerated() {
+        for (index, step) in VoiceCommand.steps(in: VoiceCommand.withoutLeadIn(text)).enumerated() {
             // The last step changed the screen; the app needs a beat to draw it before it is read again.
             if index > 0 { try? await Task.sleep(for: .seconds(JayTask.settleDelay)) }
             guard epoch == self.epoch else { return }
@@ -216,7 +218,6 @@ final class JayController {
             guard result == .done else { break }
         }
         guard epoch == self.epoch, result != .ignored else { return }
-        if result == .done { speak("Done") }
         listener.openFollowUp(at: Self.now)
     }
 
@@ -237,7 +238,7 @@ final class JayController {
             let actStarted = Date()
             let result = await dispatch(plan, step: step, epoch: epoch)
             let actEnded = Date()
-            let timings = plan.decision.timings
+            let timings = plan.decision.timings, scores = plan.decision.scores
             Raindrop.trackCommand(eventID: eventID, conversationID: conversationID, said: step, did: Self.described(plan.decision, result),
                                   properties: ["app": plan.screen.appName, "intent": plan.decision.intent.rawValue, "outcome": result.rawValue,
                                                "confidence": plan.decision.confidence, "sure": plan.decision.isSure,
@@ -247,9 +248,13 @@ final class JayController {
             if plan.decision.intent != .undo { lastCommandEventID = eventID }
             traceCommand(eventID: eventID, step: step, plan: plan, result: result, heardAt: Date(timeIntervalSinceNow: -(Self.now - heardAt)),
                          stepStarted: stepStarted, actStarted: actStarted, actEnded: actEnded)
+            let rerank = scores.rerankBest.map { String(format: "%.2f/%.2f", $0, scores.rerankNext ?? 0) } ?? "none"
             logLine("""
                 jay heardToActMs=\(Self.milliseconds(since: heardAt)) decideMs=\(plan.decideMs) jevMs=\(timings.jevMs) \
-                calls=\(timings.calls) choices=\(plan.screen.elements.count) sure=\(plan.decision.isSure) \
+                calls=\(timings.calls) choices=\(plan.screen.elements.count) sure=\(plan.decision.isSure) firstSure=\(timings.calls == 1) \
+                intent=\(plan.decision.intent.rawValue) intentP=\(String(format: "%.2f", scores.intent)) \
+                top=\(String(format: "%.2f", scores.top)) second=\(String(format: "%.2f", scores.second)) rerank=\(rerank) \
+                words=\(step.split(separator: " ").count) source=\(plan.screen.source.rawValue) \
                 speculative=\(speculated == nil ? "miss" : "hit") outcome=\(result.rawValue)
                 """)
             return result
@@ -380,7 +385,7 @@ final class JayController {
             outcome = await confirmAndRun(action, command: pending.command, screen: pending.screen, epoch: epoch)
         }
         guard epoch == self.epoch else { return }
-        if stepResult(of: outcome) == .done { speak("Done") }
+        _ = stepResult(of: outcome)
         listener.openFollowUp(at: Self.now)
     }
 
@@ -428,7 +433,6 @@ final class JayController {
         }
     }
 
-    @discardableResult
     // Each span is laid out from a measured duration ending where the next stage began, so the timeline is
     // the real one: heard, decided (build, Jev, the narrowed second look), acted, and a task's own steps.
     private func traceCommand(eventID: UUID, step: String, plan: Plan, result: StepResult, heardAt: Date,
@@ -493,6 +497,7 @@ final class JayController {
         }
     }
 
+    @discardableResult
     private func couldNotDo() -> StepResult {
         host?.showNotice("Couldn't do that")
         speak("Couldn't do that")

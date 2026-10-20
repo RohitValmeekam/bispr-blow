@@ -49,6 +49,6 @@ extension SelfCheck {
 
     private static func evalDecision(_ intent: JayIntent, _ action: JayAction?) -> JayDecision {
         JayDecision(intent: intent, action: action, runnerUp: nil, confidence: 1, isSure: true, shortlist: [],
-                    text: nil, status: nil, stuckProbability: nil, timings: JayTimings())
+                    text: nil, status: nil, stuckProbability: nil, timings: JayTimings(), scores: JayScores())
     }
 }

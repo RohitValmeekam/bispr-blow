@@ -316,3 +316,31 @@ actor ChromeDevTools {
     })()
     """ }
 }
+
+// Chrome's bookmarks, read from its profile file on each command: "go to bluejay docs" opens the saved
+// page rather than a web search, from any app. Only the names a command says are ever offered to Jev.
+enum ChromeBookmarks {
+    struct Bookmark: Equatable {
+        let name: String
+        let url: URL
+    }
+
+    private static let fileURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/Google/Chrome/Default/Bookmarks")
+
+    static func all() -> [Bookmark] {
+        guard let data = try? Data(contentsOf: fileURL),
+              let roots = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["roots"] as? [String: Any]
+        else { return [] }
+        return roots.keys.sorted().flatMap { bookmarks(in: roots[$0]) }
+    }
+
+    static func bookmarks(in node: Any?) -> [Bookmark] {
+        guard let node = node as? [String: Any] else { return [] }
+        if node["type"] as? String == "url" {
+            guard let name = node["name"] as? String, let url = (node["url"] as? String).flatMap(URL.init(string:)) else { return [] }
+            return [Bookmark(name: name, url: url)]
+        }
+        return (node["children"] as? [Any] ?? []).flatMap(bookmarks(in:))
+    }
+}

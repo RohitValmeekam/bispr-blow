@@ -56,6 +56,15 @@ struct JayTaskContext: Sendable {
     let excludedGroups: Set<String>
 }
 
+// The numbers behind a decision, so a live "Which one?" can be read from the log without labels or words.
+struct JayScores: Codable, Sendable {
+    var top = 0.0
+    var second = 0.0
+    var rerankBest: Double?
+    var rerankNext: Double?
+    var intent = 0.0
+}
+
 struct JayTimings: Codable, Sendable {
     var buildMs = 0
     var jevMs = 0
@@ -74,6 +83,7 @@ struct JayDecision: @unchecked Sendable {
     let status: JayTaskStatus?
     let stuckProbability: Double?
     let timings: JayTimings
+    let scores: JayScores
 }
 
 // Turns what the user said into one action. Code builds every option list from the screen, the
@@ -87,6 +97,12 @@ enum JayDecide {
     static let rerankSize = 5
     static let rerankYesEnough = 0.7
     static let rerankMargin = 0.2
+    // Over 164 recorded commands, acting on a lead this clear added no wrong action and halved the questions. Lower
+    // than 0.4 and 0.55 it also acted on the Bluejay page read without its content, where nothing on screen fits.
+    static let leadEnough = 0.4
+    static let leadRatio = 1.3
+    static let rerankLeadEnough = 0.55
+    static let rerankLeadMargin = 0.1
     static let noTextOption = "(nothing to type)"
     static let appOption = "Open or switch to an app (app)"
     static let webOption = "Open a website or search the web (web)"
@@ -112,7 +128,8 @@ enum JayDecide {
         if task == nil, let fast = quick(command, screen: screen, apps: apps) { return fast }
         let buildStart = Date()
         var timings = JayTimings()
-        let options = candidates(screen: screen, command: command, excludedGroups: task?.excludedGroups ?? [])
+        let options = candidates(screen: screen, command: command, apps: apps, bookmarks: ChromeBookmarks.all(),
+                                 excludedGroups: task?.excludedGroups ?? [])
         let spans = textSpans(in: command)
         let appChoices = InstalledApps.choices(apps, excluding: screen.bundleID)
         let pairs = state(command: command, screen: screen, task: task)
@@ -128,9 +145,10 @@ enum JayDecide {
         let stuckProbability = task == nil ? nil : answers["status"]?.probabilities[JayTaskStatus.stuck.rawValue] ?? 0
         let (intent, intentConfidence) = resolvedIntent(answers["intent"])
         let text = answers["text"]?.choice.flatMap { spans.contains($0) ? $0 : nil }
+        var scores = JayScores(intent: intentConfidence)
         func decision(_ action: JayAction?, runnerUp: JayAction? = nil, confidence: Double, isSure: Bool, shortlist: [JayAction] = []) -> JayDecision {
             JayDecision(intent: intent, action: action, runnerUp: runnerUp, confidence: confidence, isSure: isSure, shortlist: shortlist,
-                        text: text, status: status, stuckProbability: stuckProbability, timings: timings)
+                        text: text, status: status, stuckProbability: stuckProbability, timings: timings, scores: scores)
         }
         guard actingIntents.contains(intent) else { return decision(nil, confidence: intentConfidence, isSure: true) }
 
@@ -149,22 +167,30 @@ enum JayDecide {
         let action = resolve(top.candidate)
         let runnerUp = second.flatMap { resolve($0.candidate) }
         let isRoutingSure = top.candidate.key != appOption || isAppSure
-        if action != nil, isRoutingSure, isSure(top: top.total, second: second?.total ?? 0) {
+        scores.top = top.total
+        scores.second = second?.total ?? 0
+        // Falling back to the web is a guess at what the screen did not show, so it never acts on a lead alone.
+        let isGuessedWeb = { (candidate: JayCandidate) in candidate.key == webOption && !VoiceCommand.asksForWeb(command) }
+        if let action, isRoutingSure,
+           isSure(top: scores.top, second: scores.second, isCautious: isRisky(action, command: command) || isGuessedWeb(top.candidate)) {
             return decision(action, runnerUp: runnerUp, confidence: top.total, isSure: true)
         }
 
         let members = groups.prefix(rerankSize).map(\.candidate)
         let rerankStart = Date()
-        let scores = try await rerank(members, state: pairs, isTask: task != nil)
+        let fits = try await rerank(members, state: pairs, isTask: task != nil)
         timings.rerankMs = elapsedMs(since: rerankStart)
         timings.calls = 2
-        let order = members.indices.sorted { (scores[$0].yes, scores[$0].pick) > (scores[$1].yes, scores[$1].pick) }
+        let order = members.indices.sorted { (fits[$0].yes, fits[$0].pick) > (fits[$1].yes, fits[$1].pick) }
         let actions = order.map { resolve(members[$0]) }
-        let best = scores[order[0]].yes
-        let next = order.count > 1 ? scores[order[1]].yes : 0
-        let isRerankSure = actions[0] != nil && best >= rerankYesEnough && best - next >= rerankMargin
+        let best = fits[order[0]].yes
+        let next = order.count > 1 ? fits[order[1]].yes : 0
+        (scores.rerankBest, scores.rerankNext) = (best, next)
+        let isPicked = actions[0].map {
+            isRerankSure(best: best, next: next, isCautious: isRisky($0, command: command) || isGuessedWeb(members[order[0]]))
+        } ?? false
         return decision(actions[0], runnerUp: actions.dropFirst().lazy.compactMap { $0 }.first, confidence: best,
-                        isSure: isRerankSure, shortlist: isRerankSure ? [] : actions.compactMap { $0 })
+                        isSure: isPicked, shortlist: isPicked ? [] : actions.compactMap { $0 })
     }
 
     // The second look: the few options left in it, each with its surroundings, and a separate yes/no
@@ -276,10 +302,28 @@ enum JayDecide {
 
     // MARK: - Options
 
-    static func candidates(screen: ScreenSnapshot, command: String = "", excludedGroups: Set<String> = []) -> [JayCandidate] {
+    static func candidates(screen: ScreenSnapshot, command: String = "", apps: [InstalledApp] = [], bookmarks: [ChromeBookmarks.Bookmark] = [],
+                           excludedGroups: Set<String> = []) -> [JayCandidate] {
         let reserved = Set(SystemAction.all.map(\.title) + [appOption, webOption])
-        let room = Jev.maxChoices - SystemAction.all.count - 2
+        let spoken = " " + mentionWords(withDigits(command)) + " "
+        // "go to railway" names the "Bluejay | Railway" bookmark as surely as saying all of it
+        let target = mentionWords(VoiceCommand.target(of: command))
+        var seenBookmarks = Set<String>()
+        let saved = bookmarks.filter { bookmark in
+            let isNamed = mentionOffset(of: bookmark.name, in: spoken) != nil
+                || mentionOffset(of: target, in: " " + mentionWords(bookmark.name) + " ") != nil
+            return isNamed && seenBookmarks.insert(bookmark.name).inserted
+        }.prefix(bookmarkLimit).map { bookmark in
+            // pooled with the bookmark bar's button of the same name, which is the more direct route when it is on screen
+            JayCandidate(key: "\(bookmark.name.prefix(ScreenElements.labelLimit)) (bookmark)", detail: "Opens this page from your Chrome bookmarks.",
+                         action: .openURL(bookmark.url), group: "name:" + normalized(bookmark.name), directness: routingDirectness)
+        }.filter { !excludedGroups.contains($0.group) }
+        let room = Jev.maxChoices - SystemAction.all.count - 2 - saved.count
         let usable = screen.elements.filter { !reserved.contains($0.label) && !excludedGroups.contains(group(of: $0)) }
+        // The web is the last resort: "go to simulations" means the link on screen, "open notes" the app.
+        let namesLocal = !saved.isEmpty || usable.contains { mentionOffset(of: $0.label, in: spoken) != nil }
+            || apps.contains { mentionOffset(of: $0.name, in: spoken) != nil }
+        let offersWeb = VoiceCommand.asksForWeb(command) || !namesLocal
         let elements = fitted(usable, room: room, command: command)
             .map { element in
                 JayCandidate(key: element.label, detail: describedName(of: element) + element.detail, action: .press(element),
@@ -294,8 +338,8 @@ enum JayDecide {
                          group: appGroup, directness: routingDirectness),
             JayCandidate(key: webOption, detail: "Opens a website in the browser, or searches the web.", action: nil,
                          group: webGroup, directness: routingDirectness),
-        ].filter { !excludedGroups.contains($0.group) }
-        return elements + system + routes
+        ].filter { !excludedGroups.contains($0.group) && (offersWeb || $0.group != webGroup) }
+        return elements + saved + system + routes
     }
 
     // Past the room Jev allows, what the command names and every field always stay, and menus keep
@@ -304,7 +348,7 @@ enum JayDecide {
     static func fitted(_ elements: [ScreenElement], room: Int, command: String) -> [ScreenElement] {
         let spoken = " " + mentionWords(withDigits(command)) + " "
         let front = Array(elements.indices
-            .compactMap { index in mentionOffset(of: elements[index], in: spoken).map { (index: index, offset: $0) } }
+            .compactMap { index in mentionOffset(of: elements[index].label, in: spoken).map { (index: index, offset: $0) } }
             .sorted { ($0.offset, elements[$0.index].isMenuItem ? 1 : 0, $0.index) < ($1.offset, elements[$1.index].isMenuItem ? 1 : 0, $1.index) }
             .map(\.index).prefix(room))
         var kept = Set(front)
@@ -326,13 +370,27 @@ enum JayDecide {
 
     // Where the element's name appears whole in the command. One word that opens the command is its
     // verb ("open", "find") rather than a name, and a short one is too common to mean anything.
-    private static func mentionOffset(of element: ScreenElement, in spoken: String) -> Int? {
-        let name = mentionWords(spokenName(plainName(element.label)))
+    private static func mentionOffset(of label: String, in spoken: String) -> Int? {
+        let name = mentionWords(spokenName(plainName(label)))
         let isOneWord = !name.contains(" ")
-        guard !name.isEmpty, !isOneWord || name.count >= minMentionLength || name.allSatisfy(\.isNumber),
-              let range = spoken.range(of: " \(name) "), !(isOneWord && range.lowerBound == spoken.startIndex)
-        else { return nil }
-        return spoken.distance(from: spoken.startIndex, to: range.lowerBound)
+        guard !name.isEmpty, !isOneWord || name.count >= minMentionLength || name.allSatisfy(\.isNumber) else { return nil }
+        guard let range = spoken.range(of: " \(name) ") else { return joinedOffset(of: name, in: spoken) }
+        return isOneWord && range.lowerBound == spoken.startIndex ? nil : spoken.distance(from: spoken.startIndex, to: range.lowerBound)
+    }
+
+    // The recognizer splits and joins compounds its own way: "blue jay docs" names "Bluejay Docs".
+    private static func joinedOffset(of name: String, in spoken: String) -> Int? {
+        let squashed = name.replacingOccurrences(of: " ", with: ""), nameWords = name.split(separator: " ").count
+        guard squashed.count >= minMentionLength else { return nil }
+        let words = spoken.split(separator: " ")
+        for start in words.indices {
+            var joined = ""
+            for end in start..<words.count where joined.count < squashed.count {
+                joined += words[end]
+                if joined == squashed, end - start + 1 != nameWords { return spoken.distance(from: spoken.startIndex, to: words[start].startIndex) - 1 }
+            }
+        }
+        return nil
     }
 
     // An Open Recent entry is a path, and nobody says the folders above it: "~/Desktop/bluejay/bluejay_middleware"
@@ -354,6 +412,8 @@ enum JayDecide {
     }
 
     private static let minMentionLength = 3
+    // Past this many matching bookmarks Jev's vote is split too thin to act on anyway.
+    private static let bookmarkLimit = 10
     private static let rowRoles: Set<String> = ["AXRow", "AXCell"]
     private static let catalogShortcuts = Set(SystemAction.all.compactMap { action -> String? in
         if case .keys(let shortcut) = action.mechanism { return shortcut.display }
@@ -392,7 +452,20 @@ enum JayDecide {
         return groups.enumerated().sorted { ($0.element.total, -$0.offset) > ($1.element.total, -$1.offset) }.map(\.element)
     }
 
-    static func isSure(top: Double, second: Double) -> Bool { top >= confidentEnough && top >= clearWinnerRatio * second }
+    // A pick that is not risky acts on a clear lead alone: what it did is checked after, the runner-up is
+    // tried when nothing changed, and "undo" is one word. A cautious one needs the strict bar, and a risky one then still asks.
+    static func isSure(top: Double, second: Double, isCautious: Bool) -> Bool {
+        (top >= confidentEnough && top >= clearWinnerRatio * second) || (!isCautious && top >= leadEnough && top >= leadRatio * second)
+    }
+
+    static func isRerankSure(best: Double, next: Double, isCautious: Bool) -> Bool {
+        (best >= rerankYesEnough && best - next >= rerankMargin) || (!isCautious && best >= rerankLeadEnough && best - next >= rerankLeadMargin)
+    }
+
+    // Return counts as risky here: whether the user named it while holding the shortcut is the executor's to know.
+    private static func isRisky(_ action: JayAction, command: String) -> Bool {
+        JayExecutor.isRisky(action, command: command, isWakeListening: true)
+    }
 
     // MARK: - Fast path
 
@@ -421,7 +494,7 @@ enum JayDecide {
 
     private static func certain(_ intent: JayIntent, _ action: JayAction? = nil, text: String? = nil) -> JayDecision {
         JayDecision(intent: intent, action: action, runnerUp: nil, confidence: 1, isSure: true, shortlist: [],
-                    text: text, status: nil, stuckProbability: nil, timings: JayTimings())
+                    text: text, status: nil, stuckProbability: nil, timings: JayTimings(), scores: JayScores(top: 1, intent: 1))
     }
 
     private static let localIntents: [String: JayIntent] = [

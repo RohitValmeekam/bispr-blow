@@ -55,6 +55,7 @@ struct ScreenFingerprint: Equatable, Codable {
     let focusedValueLength: Int
     let url: String?
     let childCount: Int
+    let textDigest: Int
 }
 
 enum ScreenElements {
@@ -69,6 +70,7 @@ enum ScreenElements {
     static let labelLimit = 60
 
     private static let firstTextDepth = 3
+    private static let textDigestBudget = 60
     private static let webAreaSearchBudget = 300
     private static let chromeBundleID = "com.google.Chrome"
     private static let servicesMenu = "Services"
@@ -135,7 +137,7 @@ enum ScreenElements {
     static func fingerprint() -> ScreenFingerprint {
         guard let app = NSWorkspace.shared.frontmostApplication else {
             return ScreenFingerprint(bundleID: "", windowTitle: "", windowCount: 0, focusedRole: "", focusedTitle: "",
-                                     focusedValueLength: 0, url: nil, childCount: 0)
+                                     focusedValueLength: 0, url: nil, childCount: 0, textDigest: 0)
         }
         let root = bounded(AXUIElementCreateApplication(app.processIdentifier))
         let window = (attribute(root, kAXFocusedWindowAttribute) as AXUIElement?).map(bounded)
@@ -150,7 +152,21 @@ enum ScreenElements {
             focusedTitle: focusedValues[kAXTitleAttribute] as? String ?? "",
             focusedValueLength: focusedValues[kAXNumberOfCharactersAttribute] as? Int ?? 0,
             url: windowValues[kAXDocumentAttribute] as? String,
-            childCount: window.map { count($0, kAXChildrenAttribute) } ?? 0)
+            childCount: window.map { count($0, kAXChildrenAttribute) } ?? 0,
+            textDigest: window.map(textDigest(of:)) ?? 0)
+    }
+
+    // A press can change only what a label shows, such as a calculator's display, which nothing else here sees.
+    private static func textDigest(of window: AXUIElement) -> Int {
+        var hasher = Hasher()
+        var queue = [window], read = 0
+        while !queue.isEmpty, read < textDigestBudget {
+            let values = attributeValues(of: bounded(queue.removeFirst()), [kAXRoleAttribute, kAXValueAttribute, kAXChildrenAttribute])
+            read += 1
+            if values[kAXRoleAttribute] as? String == "AXStaticText" { hasher.combine(values[kAXValueAttribute] as? String) }
+            queue += values[kAXChildrenAttribute] as? [AXUIElement] ?? []
+        }
+        return hasher.finalize()
     }
 
     // MARK: - Pure text

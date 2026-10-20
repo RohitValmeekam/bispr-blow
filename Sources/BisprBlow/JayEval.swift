@@ -33,6 +33,9 @@ enum JayEval {
     static let tailFraction = 0.9
     static let activateTimeout: TimeInterval = 2
     static let activatePoll: TimeInterval = 0.05
+    // A live task is never the user asking, so a step about to press one of these ends the run before it acts.
+    static let liveForbidden = try! NSRegularExpression(pattern: #"\b(?:run|create|delete|save|send|submit|remove)\b"#, options: .caseInsensitive)
+    static let forbiddenExitCode: Int32 = 3
     private static let millisecondsPerSecond = 1000.0
 
     struct Spread: Encodable { let p50: Int; let p90: Int }
@@ -50,6 +53,7 @@ enum JayEval {
         let calls: Int
         let runnerUp: String?
         let shortlist: [String]
+        let scores: JayScores
         var outcome: String?
         var actMs: Int?
         var steps: [String]?
@@ -122,7 +126,7 @@ enum JayEval {
             }
             let started = ProcessInfo.processInfo.systemUptime
             // JayController runs a chained command a step at a time
-            let steps = VoiceCommand.steps(in: VoiceCommand.withoutLeadingJoint(evalCase.command))
+            let steps = VoiceCommand.steps(in: VoiceCommand.withoutLeadIn(evalCase.command))
             let decision = try await JayDecide.decide(steps.first ?? evalCase.command, screen: screen, apps: apps)
             return scoreDecision(evalCase, decision: decision, isChained: steps.count > 1, screen: screen, decideMs: elapsedMs(since: started))
         } catch let failure as Jev.Failure {
@@ -142,14 +146,22 @@ enum JayEval {
         let clipboard = NSPasteboard.general.string(forType: .string)
         let actStarted = ProcessInfo.processInfo.systemUptime
         if evalCase.expect.task == true {
+            var refused: [String] = []
             // a step that leaves the app under test ends the task, so a wrong pick cannot keep acting elsewhere
             let task = await JayTask.run(goal: evalCase.command, first: decision, apps: apps,
                                          isCurrent: { NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID },
-                                         report: { _ in }, confirm: { _ in false })
+                                         report: { step in
+                                             guard liveForbidden.firstMatch(in: step, range: NSRange(step.startIndex..., in: step)) != nil else { return }
+                                             print("jay-eval: stopped before a forbidden step")
+                                             exit(forbiddenExitCode)
+                                         }, confirm: { action in
+                                             refused.append("refused:" + action.key)
+                                             return false
+                                         })
             result.ranTask = true
             result.finishedTask = task.outcome == .done
             result.row.outcome = task.outcome.rawValue
-            result.row.steps = task.actionKeys
+            result.row.steps = task.actionKeys + refused
         } else {
             result.row.outcome = await actOnDecision(decision, isRight: result.row.right, command: evalCase.command, screen: screen)
         }
@@ -189,7 +201,7 @@ enum JayEval {
         let row = Row(id: evalCase.id, intent: decision.intent.rawValue, got: decision.action?.key ?? "none",
                       sure: decision.isSure, confidence: decision.confidence, right: isRight(decision, expect: expect, isChained: isChained),
                       decideMs: decideMs, jevMs: decision.timings.jevMs, calls: decision.timings.calls,
-                      runnerUp: decision.runnerUp?.key, shortlist: decision.shortlist.map(\.key))
+                      runnerUp: decision.runnerUp?.key, shortlist: decision.shortlist.map(\.key), scores: decision.scores)
         return Scored(row: row, rerankMs: decision.timings.rerankMs, wasDecided: true,
                       wasAsked: !decision.isSure && !decision.shortlist.isEmpty,
                       askedContainsRight: !decision.isSure && decision.shortlist.contains { expect.actions.contains($0.key) },
@@ -206,7 +218,7 @@ enum JayEval {
 
     private static func failCase(_ evalCase: JayEvalCase, reason: String) -> Scored {
         let row = Row(id: evalCase.id, intent: "error", got: reason, sure: false, confidence: 0, right: false, decideMs: 0, jevMs: 0, calls: 0,
-                      runnerUp: nil, shortlist: [])
+                      runnerUp: nil, shortlist: [], scores: JayScores())
         return Scored(row: row, rerankMs: 0, wasDecided: false, wasAsked: false, askedContainsRight: false,
                       expectsRisky: evalCase.expect.risky == true, missedRisky: false)
     }

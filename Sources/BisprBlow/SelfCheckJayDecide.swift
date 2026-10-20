@@ -39,9 +39,47 @@ extension SelfCheck {
         guard case .keys(let saveKeys)? = SystemAction.named("save")?.mechanism else { preconditionFailure("save is not a shortcut") }
         precondition(ScreenElements.shortcutText(cmdChar: "S", modifiers: 0) == saveKeys.display)
 
-        precondition(JayDecide.isSure(top: 0.6, second: 0.3))
-        precondition(!JayDecide.isSure(top: 0.6, second: 0.31))
-        precondition(!JayDecide.isSure(top: 0.59, second: 0.1))
+        precondition(JayDecide.isSure(top: 0.6, second: 0.3, isCautious: true))
+        precondition(!JayDecide.isSure(top: 0.6, second: 0.31, isCautious: true))
+        precondition(!JayDecide.isSure(top: 0.59, second: 0.1, isCautious: true))
+        precondition(JayDecide.isSure(top: 0.45, second: 0.3, isCautious: false))
+        precondition(!JayDecide.isSure(top: 0.45, second: 0.3, isCautious: true))
+        precondition(!JayDecide.isSure(top: 0.45, second: 0.35, isCautious: false) && !JayDecide.isSure(top: 0.39, second: 0.1, isCautious: false))
+        precondition(JayDecide.isRerankSure(best: 0.55, next: 0.4, isCautious: false))
+        precondition(!JayDecide.isRerankSure(best: 0.55, next: 0.4, isCautious: true))
+
+        // The web never beats what the command names on screen, in the installed apps or in the bookmarks.
+        let simulations = decideScreen([decideElement("Simulations (link)")])
+        precondition(!JayDecide.candidates(screen: simulations, command: "go to simulations").contains { $0.key == JayDecide.webOption })
+        precondition(JayDecide.candidates(screen: simulations, command: "look up simulations").contains { $0.key == JayDecide.webOption })
+        precondition(JayDecide.candidates(screen: simulations, command: "go to linkedin").contains { $0.key == JayDecide.webOption })
+        let notesApp = InstalledApp(name: "Notes", bundleID: "com.apple.Notes", path: "/System/Applications/Notes.app")
+        precondition(!JayDecide.candidates(screen: simulations, command: "open my notes", apps: [notesApp]).contains { $0.key == JayDecide.webOption })
+        let bookmarkFile: [String: Any] = ["children": [["type": "url", "name": "Bluejay Docs", "url": "https://docs.getbluejay.ai/"],
+                                                        ["type": "folder", "children": [["type": "url", "name": "Bluejay", "url": "https://getbluejay.ai/"]]]]]
+        let saved = ChromeBookmarks.bookmarks(in: bookmarkFile)
+        precondition(saved.map(\.name) == ["Bluejay Docs", "Bluejay"])
+        // Fifteen near-namesakes split Jev's vote; pooled, the docs bookmark still leads clearly and acts.
+        let chrome = decideScreen(["Bluejay (bookmark button)", "Bluejay Docs (bookmark button)", "Bluejay Internal Dashboard (bookmark button)",
+                                   "bluejay | Agents (tab)"].map { decideElement($0) } + [decideElement("Bluejay Docs (menu item)", role: "AXMenuItem")])
+        let docs = JayDecide.candidates(screen: chrome, command: "go to bluejay docs", bookmarks: saved)
+        precondition(!docs.contains { $0.key == JayDecide.webOption } && docs.contains { $0.key == "Bluejay Docs (bookmark)" })
+        let docsRanked = JayDecide.ranked(docs, probabilities: ["Bluejay Docs (bookmark button)": 0.18, "Bluejay Docs (menu item)": 0.14,
+                                                                "Bluejay Docs (bookmark)": 0.1, "Bluejay (bookmark button)": 0.22,
+                                                                "Bluejay Internal Dashboard (bookmark button)": 0.1, "bluejay | Agents (tab)": 0.08])
+        precondition(docsRanked.first?.candidate.key == "Bluejay Docs (bookmark button)")
+        precondition(JayDecide.isSure(top: docsRanked[0].total, second: docsRanked[1].total, isCautious: false))
+        // From another app, said the way the recognizer splits it, the docs bookmark itself leads and opens the docs.
+        let away = JayDecide.candidates(screen: simulations, command: "go to blue jay docs", bookmarks: saved)
+        precondition(!away.contains { $0.key == JayDecide.webOption })
+        precondition(away.first { $0.key == "Bluejay Docs (bookmark)" }?.action?.key == "url:docs.getbluejay.ai")
+        let awayRanked = JayDecide.ranked(away, probabilities: ["Bluejay Docs (bookmark)": 0.45, "Bluejay (bookmark)": 0.3])
+        precondition(awayRanked[0].candidate.key == "Bluejay Docs (bookmark)")
+        precondition(JayDecide.isSure(top: awayRanked[0].total, second: awayRanked[1].total, isCautious: false))
+        let railway = ChromeBookmarks.Bookmark(name: "Bluejay | Railway", url: URL(string: "https://railway.com/project/x")!)
+        let railwayStep = VoiceCommand.withoutLeadIn("Um, can you go to railway?")
+        precondition(JayDecide.candidates(screen: simulations, command: railwayStep, bookmarks: saved + [railway]).map(\.key)
+            .contains("Bluejay | Railway (bookmark)"))
 
         precondition(JayDecide.textSpans(in: "type hello world").contains("hello world"))
         precondition(JayDecide.textSpans(in: "say \"on my way\"").contains("on my way"))
@@ -126,6 +164,11 @@ extension SelfCheck {
         precondition(VoiceCommand.hasRiskyWord("forward this to Sam"))
         precondition(!VoiceCommand.hasRiskyWord("go forward"))
         precondition(!VoiceCommand.hasRiskyWord("resend"))
+        // A risky command asks whatever it picked, so a clear lead on it can never act unasked.
+        for command in ["move this file to the bin", "bin this note", "sign me out", "get rid of this issue", "ship it", "nuke the app data"] {
+            precondition(JayExecutor.isRisky(.system(SystemAction.named("scrollDown")!), command: command, isWakeListening: false), command)
+        }
+        precondition(!VoiceCommand.hasRiskyWord("open the binary") && !VoiceCommand.hasRiskyWord("ship items"))
         precondition(VoiceCommand.steps(in: "open the command palette and run format document") == ["open the command palette", "run format document"])
         precondition(VoiceCommand.isUnfinished("open it with"))
     }

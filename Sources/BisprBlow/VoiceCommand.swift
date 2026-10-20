@@ -10,14 +10,14 @@ enum VoiceCommand {
                                      "trash", "erase", "empty", "post", "publish", "share", "approve", "uninstall",
                                      "reset", "leave", "decline", "confirm", "order", "checkout", "check out",
                                      "deploy", "reply all", "kill", "close all", "force", "wipe", "revoke", "unsubscribe",
-                                     "cancel subscription"]
+                                     "cancel subscription", "get rid of", "nuke", "close every"]
 
     // A word prefix, so "sending" and "Move to Trash" count but "resend" does not. "Go forward" is a
     // browser's history, forwarding mail is not. "Clear" needs an object: "Clear History" counts, a
     // calculator's "All Clear (button)" does not.
     private static let riskyWord = try! NSRegularExpression(
         pattern: #"\b(?:"# + riskyWords.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|")
-            + #"|(?<!go )(?<!fast )forward|clear\s+\w)"#,
+            + #"|(?<!go )(?<!fast )forward|clear\s+\w|bin\b|ship\s+it\b|(?:sign|log)\s+me\s+out)"#,
         options: .caseInsensitive)
 
     static func hasRiskyWord(_ text: String) -> Bool {
@@ -29,8 +29,7 @@ enum VoiceCommand {
     static func webAddress(for spoken: String) -> URL? {
         let phrase = spoken.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
         let isSearch = phrase.range(of: #"^search\b"#, options: [.regularExpression, .caseInsensitive]) != nil
-        let target = phrase.replacingOccurrences(of: webVerbs, with: "", options: [.regularExpression, .caseInsensitive])
-            .trimmingCharacters(in: .whitespaces)
+        let target = target(of: phrase)
         guard !target.isEmpty else { return nil }
         if !isSearch, target.range(of: #"^[\w-]+(\.[\w-]+)+(/\S*)?$"#, options: .regularExpression) != nil {
             return URL(string: "https://\(target)")
@@ -48,12 +47,29 @@ enum VoiceCommand {
         return url
     }
 
+    // Saying the web, a search engine or a domain anywhere in the command: "look up the weather", "go to github.com".
+    static func asksForWeb(_ spoken: String) -> Bool {
+        webRequest.firstMatch(in: spoken, range: NSRange(spoken.startIndex..., in: spoken)) != nil
+    }
+
+    private static let webRequest = try! NSRegularExpression(
+        pattern: #"\b(?:web|website|site|online|internet|google|googling|duckduckgo|look\s+up)\b|\b[\w-]+\.(?:"#
+            + webSuffixes.sorted().joined(separator: "|") + #")\b"#,
+        options: .caseInsensitive)
+
     private static let searchPrefix = "https://duckduckgo.com/?q="
     private static let webSuffixes: Set<String> = ["com", "org", "net", "io", "ai", "app", "dev", "co", "so", "me", "us", "uk",
                                                    "ca", "de", "fr", "in", "edu", "gov", "xyz", "tv", "gg", "sh", "tech", "page"]
 
     // `.urlQueryAllowed` keeps & + = and #, which would split or end the query: "C++ & Rust".
     private static let queryValue = CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&+=#;?/"))
+
+    // What a "go to" names: "go to the Bluejay docs" → "Bluejay docs".
+    static func target(of spoken: String) -> String {
+        spoken.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+            .replacingOccurrences(of: webVerbs, with: "", options: [.regularExpression, .caseInsensitive])
+            .trimmingCharacters(in: .whitespaces)
+    }
 
     private static let webVerbs = #"^(?:go to|open|visit|pull up|look up|search(?: the web| google| online)?(?: for)?)\s+(?:the\s+)?"#
 
@@ -78,10 +94,17 @@ enum VoiceCommand {
         return last.map { danglingWords.contains($0) } ?? false
     }
 
-    static func withoutLeadingJoint(_ said: String) -> String {
-        said.replacingOccurrences(of: #"^\s*(?:and\s+then|then|and)\b[\s,]*"#, with: "", options: [.regularExpression, .caseInsensitive])
+    // Live speech opens with what a typed command never has: "Um, can you go to railway?" is "go to railway".
+    static func withoutLeadIn(_ said: String) -> String {
+        let command = said.replacingOccurrences(of: leadIn, with: "", options: [.regularExpression, .caseInsensitive])
+            .replacingOccurrences(of: #"[\s,]+please[\s.!?]*$"#, with: "", options: [.regularExpression, .caseInsensitive])
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        // "Okay." on its own is still something said, and Jev's to read
+        return JayDecide.normalized(command).isEmpty ? said.trimmingCharacters(in: .whitespacesAndNewlines) : command
     }
+
+    private static let leadIn = #"^(?:\s*(?:and\s+then|then|and|u+m+|u+h+|uhm|erm|hmm+|oh|okay|ok|so|alright|all right|hey|please|just|"#
+        + #"(?:can|could|would|will)\s+you|go\s+ahead\s+and|i\s+(?:want|need)\s+(?:you\s+)?to|let'?s)\b[\s,.!?]*)+"#
 
     private static let danglingWords: Set<String> = ["and", "then", "to", "for", "the", "a", "my", "go", "open", "type", "write", "search",
                                                     "into", "on", "with", "in", "at", "from", "called", "named", "saying", "switch"]

@@ -166,7 +166,11 @@ extension SelfCheck {
         precondition(VoiceCommand.isUnfinished("go to"))
         precondition(VoiceCommand.isUnfinished("open Slack and"))
         precondition(!VoiceCommand.isUnfinished("go to LinkedIn."))
-        precondition(VoiceCommand.withoutLeadingJoint("and then go to my DMs") == "go to my DMs")
+        precondition(VoiceCommand.withoutLeadIn("and then go to my DMs") == "go to my DMs")
+        precondition(VoiceCommand.withoutLeadIn("Um, can you go to railway?") == "go to railway?")
+        precondition(VoiceCommand.withoutLeadIn("Okay, please just open traces, please.") == "open traces")
+        precondition(VoiceCommand.withoutLeadIn("solve it") == "solve it")
+        precondition(VoiceCommand.withoutLeadIn("Okay.") == "Okay." && VoiceCommand.withoutLeadIn("Okay. Go back.") == "Go back.")
     }
 
     // The field's own name is context too, and it leads: in an empty message box it is all there is.

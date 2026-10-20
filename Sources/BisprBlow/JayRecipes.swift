@@ -86,7 +86,8 @@ final class JayRecipes: @unchecked Sendable {
             let saved = try JSONDecoder().decode([JayRecipe].self, from: Data(contentsOf: fileURL))
             return Dictionary(saved.map { ($0.key, $0) }, uniquingKeysWith: { _, newer in newer })
         } catch {
-            logLine("jay recipes unreadable error=\(error.localizedDescription)")
+            // --self-check writes a broken file on purpose, so the name tells its line from the real store's
+            logLine("jay recipes unreadable file=\(fileURL.lastPathComponent) error=\(error.localizedDescription)")
             return [:]
         }
     }
