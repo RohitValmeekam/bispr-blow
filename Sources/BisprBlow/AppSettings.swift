@@ -112,6 +112,11 @@ final class AppSettings: ObservableObject {
     @Published var jaySpeaks: Bool {
         didSet { defaults.set(jaySpeaks, forKey: "jaySpeaks") }
     }
+    // Each Jay command — what was said, what Jay did, and how sure it was — goes to Raindrop for
+    // monitoring. Off by default: it is a third party seeing the user's words.
+    @Published var sendJayToRaindrop: Bool {
+        didSet { defaults.set(sendJayToRaindrop, forKey: "sendJayToRaindrop") }
+    }
     // One request to api.github.com at launch, asking whether a newer release is out. On by
     // default: an update nobody hears about is the same as no update, and an opt-in check that
     // nobody finds is dead code. Off, nothing is asked and nothing is sent — and it is the only
@@ -271,6 +276,7 @@ final class AppSettings: ObservableObject {
         voiceCommands = defaults.bool(forKey: "voiceCommands")
         jayMode = defaults.bool(forKey: "jayMode")
         jaySpeaks = defaults.object(forKey: "jaySpeaks") as? Bool ?? true
+        sendJayToRaindrop = defaults.bool(forKey: "sendJayToRaindrop")
         checkForUpdates = defaults.object(forKey: "checkForUpdates") as? Bool ?? true
         appearance = Self.appearance(stored: defaults.string(forKey: "appearance"))
         if let data = defaults.data(forKey: "bindings"),

@@ -128,6 +128,10 @@ struct SettingsView: View {
                           help: "Jay answers out loud, like \"Done\" or \"Which one?\". Off, the answer only shows beside the bar.",
                           isOn: $settings.jaySpeaks)
                     .disabled(!settings.voiceCommands)
+                ToggleRow("Send Jay sessions to Raindrop",
+                          help: "For each command, Raindrop (raindrop.ai) receives what you said, what Jay did, the app's name, and how Jay decided: its confidence, timings and whether it asked or acted. Also when you undo, stop or pick from a question. Never the list of things on screen, what is typed in fields, or audio. Needs a write key in your Keychain under raindrop-write-key.",
+                          isOn: $settings.sendJayToRaindrop)
+                    .disabled(!settings.voiceCommands)
                 ToggleRow("Tell me when there's a new version",
                           help: "Asks GitHub once at launch whether a newer release is out, and shows a line on Home if there is. Nothing is downloaded or installed for you, and nothing about you is sent.",
                           isOn: $settings.checkForUpdates)

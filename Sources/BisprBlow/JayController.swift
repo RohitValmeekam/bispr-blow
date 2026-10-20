@@ -18,6 +18,7 @@ final class JayController {
 
     private struct Choice {
         let id: Int
+        let eventID: UUID
         let actions: [JayAction]
         let command: String
         let screen: ScreenSnapshot
@@ -45,6 +46,10 @@ final class JayController {
     private var confirmation: Confirmation?
     private var questionCount = 0
     private var speechStartedAt: TimeInterval = 0
+    // Raindrop threads a session's commands together and hangs undo, stop and picks on the command they answer.
+    private var conversationID = UUID()
+    private var commandEventID = UUID()
+    private var lastCommandEventID: UUID?
 
     init(host: DictationController) { self.host = host }
 
@@ -59,6 +64,7 @@ final class JayController {
     func beginListening(requiresWake: Bool) {
         listener = JayListener(requiresWake: requiresWake)
         listener.isBusy = runningCommands > 0
+        conversationID = UUID()
         ticker?.invalidate()
         ticker = Timer.scheduledTimer(withTimeInterval: Self.tickInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
@@ -89,6 +95,7 @@ final class JayController {
 
     // Esc, "stop", or the user starting over: nothing heard or queued so far runs.
     func stop() {
+        if isBusy, let last = lastCommandEventID { Raindrop.signal("stopped", on: last, isNegative: true) }
         epoch += 1
         dropSpeculation()
         listener.mode = .command
@@ -221,8 +228,17 @@ final class JayController {
                 host?.showNotice("Couldn't read the app in front")
                 return .failed
             }
+            commandEventID = UUID()
+            let eventID = commandEventID
             let result = await dispatch(plan, step: step, epoch: epoch)
             let timings = plan.decision.timings
+            Raindrop.trackCommand(eventID: eventID, conversationID: conversationID, said: step, did: Self.described(plan.decision, result),
+                                  properties: ["app": plan.screen.appName, "intent": plan.decision.intent.rawValue, "outcome": result.rawValue,
+                                               "confidence": plan.decision.confidence, "sure": plan.decision.isSure,
+                                               "jev_calls": timings.calls, "decide_ms": plan.decideMs, "jev_ms": timings.jevMs,
+                                               "heard_to_act_ms": Self.milliseconds(since: heardAt), "choices": plan.screen.elements.count,
+                                               "speculative": speculated != nil, "screen_source": plan.screen.source.rawValue])
+            if plan.decision.intent != .undo { lastCommandEventID = eventID }
             logLine("""
                 jay heardToActMs=\(Self.milliseconds(since: heardAt)) decideMs=\(plan.decideMs) jevMs=\(timings.jevMs) \
                 calls=\(timings.calls) choices=\(plan.screen.elements.count) sure=\(plan.decision.isSure) \
@@ -270,6 +286,7 @@ final class JayController {
             host?.sleepJay()
             return .stopped
         case .undo:
+            if let last = lastCommandEventID { Raindrop.signal("undone", on: last, isNegative: true) }
             guard JayExecutor.undoLast() else {
                 host?.showNotice("Nothing to undo")
                 return .failed
@@ -323,7 +340,7 @@ final class JayController {
         let shown = Array(actions.prefix(JayDecide.rerankSize))
         questionCount += 1
         let id = questionCount
-        choice = Choice(id: id, actions: shown, command: command, screen: screen)
+        choice = Choice(id: id, eventID: commandEventID, actions: shown, command: command, screen: screen)
         JayLabels.show(shown.map(Self.frame(of:)))
         let options = shown.enumerated().map { "\($0.offset + 1) \($0.element.title)" }.joined(separator: " · ")
         host?.showNotice("Which one? \(options)", for: JayListener.followUpWindow)
@@ -340,6 +357,8 @@ final class JayController {
     }
 
     private func runChosen(_ action: JayAction, from pending: Choice) async {
+        Raindrop.signal("picked from question", on: pending.eventID, isNegative: false,
+                        properties: ["picked": action.title, "rank": pending.actions.firstIndex { $0.title == action.title }.map { $0 + 1 } ?? 0])
         guard Self.isInFront(pending.screen) else {
             couldNotDo()
             return
@@ -399,6 +418,20 @@ final class JayController {
     }
 
     @discardableResult
+    // What Jay did, in words, for Raindrop's output column.
+    private static func described(_ decision: JayDecision, _ result: StepResult) -> String {
+        let target = decision.action?.title ?? decision.intent.rawValue
+        switch result {
+        case .done: return decision.intent == .task ? "Did the task, starting with \(target)" : "Did: \(target)"
+        case .asked: return "Asked which one: " + (decision.shortlist.isEmpty ? [target] : decision.shortlist.map(\.title)).joined(separator: " · ")
+        case .stopped: return "Stopped"
+        case .ignored: return "Ignored (not for Jay)"
+        case .refused: return "Refused: \(target)"
+        case .unchanged: return "Tried \(target), nothing changed"
+        case .failed: return "Couldn't do: \(target)"
+        }
+    }
+
     private func couldNotDo() -> StepResult {
         host?.showNotice("Couldn't do that")
         speak("Couldn't do that")
