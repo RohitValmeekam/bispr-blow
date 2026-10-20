@@ -5,7 +5,6 @@ import Security
 // decided. Raindrop has no Swift SDK, so this is its HTTP API. Opt-in, and silent without a write key.
 enum Raindrop {
     private static let base = URL(string: "https://api.raindrop.ai/v1/")!
-    private static let project = "jay"
     private static let keychainService = "raindrop-write-key"
     private static let installIDKey = "raindropInstallID"
     private static let attempts = 3
@@ -54,7 +53,6 @@ enum Raindrop {
         request.httpMethod = "POST"
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(project, forHTTPHeaderField: "X-Raindrop-Project-Id")
         request.httpBody = data
         // event_id makes a resend harmless, so a dropped connection is retried rather than losing the event.
         Task.detached {
