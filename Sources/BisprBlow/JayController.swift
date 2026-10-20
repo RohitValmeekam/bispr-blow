@@ -50,6 +50,8 @@ final class JayController {
     private var conversationID = UUID()
     private var commandEventID = UUID()
     private var lastCommandEventID: UUID?
+    // The running task's steps, as they are reported, for the command's trace.
+    private var taskSteps: [(title: String, at: Date)] = []
 
     init(host: DictationController) { self.host = host }
 
@@ -219,6 +221,7 @@ final class JayController {
     }
 
     private func runStep(_ step: String, heardAt: TimeInterval, epoch: Int) async -> StepResult {
+        let stepStarted = Date()
         let speculated = takeSpeculation(matching: step)
         do {
             let made: Plan?
@@ -230,7 +233,10 @@ final class JayController {
             }
             commandEventID = UUID()
             let eventID = commandEventID
+            taskSteps = []
+            let actStarted = Date()
             let result = await dispatch(plan, step: step, epoch: epoch)
+            let actEnded = Date()
             let timings = plan.decision.timings
             Raindrop.trackCommand(eventID: eventID, conversationID: conversationID, said: step, did: Self.described(plan.decision, result),
                                   properties: ["app": plan.screen.appName, "intent": plan.decision.intent.rawValue, "outcome": result.rawValue,
@@ -239,6 +245,8 @@ final class JayController {
                                                "heard_to_act_ms": Self.milliseconds(since: heardAt), "choices": plan.screen.elements.count,
                                                "speculative": speculated != nil, "screen_source": plan.screen.source.rawValue])
             if plan.decision.intent != .undo { lastCommandEventID = eventID }
+            traceCommand(eventID: eventID, step: step, plan: plan, result: result, heardAt: Date(timeIntervalSinceNow: -(Self.now - heardAt)),
+                         stepStarted: stepStarted, actStarted: actStarted, actEnded: actEnded)
             logLine("""
                 jay heardToActMs=\(Self.milliseconds(since: heardAt)) decideMs=\(plan.decideMs) jevMs=\(timings.jevMs) \
                 calls=\(timings.calls) choices=\(plan.screen.elements.count) sure=\(plan.decision.isSure) \
@@ -319,7 +327,10 @@ final class JayController {
         let apps = await Task.detached { InstalledApps.all() }.value
         let task = await JayTask.run(goal: goal, first: first, apps: apps,
                                      isCurrent: { [weak self] in self?.epoch == epoch },
-                                     report: { [weak self] in self?.host?.showNotice($0) },
+                                     report: { [weak self] in
+                                         self?.taskSteps.append(($0, Date()))
+                                         self?.host?.showNotice($0)
+                                     },
                                      confirm: { [weak self] in await self?.askConfirmation(title: $0.title, isRisky: true) ?? false })
         logLine("jay task outcome=\(task.outcome.rawValue) actions=\(task.actions) replayed=\(task.replayed)")
         switch task.outcome {
@@ -418,6 +429,56 @@ final class JayController {
     }
 
     @discardableResult
+    // Each span is laid out from a measured duration ending where the next stage began, so the timeline is
+    // the real one: heard, decided (build, Jev, the narrowed second look), acted, and a task's own steps.
+    private func traceCommand(eventID: UUID, step: String, plan: Plan, result: StepResult, heardAt: Date,
+                              stepStarted: Date, actStarted: Date, actEnded: Date) {
+        typealias Span = Raindrop.Span
+        let timings = plan.decision.timings
+        let commandStart = min(heardAt, stepStarted)
+        let decideStart = actStarted.addingTimeInterval(-Double(plan.decideMs) / 1000)
+        let seconds = { (ms: Int) in Double(ms) / 1000 }
+        let built = decideStart.addingTimeInterval(seconds(timings.buildMs))
+        let firstCall = built.addingTimeInterval(seconds(timings.jevMs))
+        var steps = [
+            Span(name: "end of speech", kind: "task", start: min(heardAt, stepStarted), end: stepStarted),
+            Self.readSpan(plan.screen, commandStart: commandStart),
+            Span(name: "build choices", kind: "tool", start: decideStart, end: built),
+        ]
+        if timings.calls > 0 {
+            steps.append(Span(name: "jev decide", kind: "tool", start: built, end: firstCall, input: step,
+                              output: timings.calls > 1 ? "unsure, asked again" : Self.described(plan.decision, result)))
+        }
+        if timings.calls > 1 {
+            steps.append(Span(name: "jev second look", kind: "tool", start: firstCall, end: firstCall.addingTimeInterval(seconds(timings.rerankMs)),
+                              input: step, output: "confidence \(plan.decision.confidence)"))
+        }
+        let actIndex = steps.count
+        steps.append(Span(name: plan.decision.intent == .task ? "run task" : "act", kind: "tool", start: actStarted, end: actEnded,
+                          input: plan.decision.action?.title, output: result.rawValue))
+        for (index, taskStep) in taskSteps.enumerated() {
+            let end = index + 1 < taskSteps.count ? taskSteps[index + 1].at : actEnded
+            steps.append(Span(name: taskStep.title, kind: "tool", start: taskStep.at, end: end, parent: actIndex))
+        }
+        Raindrop.trackTrace(eventID: eventID,
+                            command: Span(name: "jay command", kind: "workflow", start: commandStart, end: actEnded,
+                                          input: step, output: Self.described(plan.decision, result)),
+                            steps: steps)
+    }
+
+    // The screen is read ahead of time and kept warm, so a read from before the command shows as a zero-length
+    // mark with its age instead of stretching the command's timeline back to when it happened.
+    private static func readSpan(_ screen: ScreenSnapshot, commandStart: Date) -> Raindrop.Span {
+        let found = "\(screen.elements.count) choices via \(screen.source.rawValue)"
+        let age = Int(commandStart.timeIntervalSince(screen.takenAt) * 1000)
+        guard age > 0 else {
+            return Raindrop.Span(name: "read screen", kind: "tool", start: screen.takenAt,
+                                 end: screen.takenAt.addingTimeInterval(Double(screen.readMs) / 1000), input: screen.appName, output: found)
+        }
+        return Raindrop.Span(name: "read screen (prefetched)", kind: "tool", start: commandStart, end: commandStart, input: screen.appName,
+                             output: "\(found), read in \(screen.readMs)ms, \(age)ms before the command")
+    }
+
     // What Jay did, in words, for Raindrop's output column.
     private static func described(_ decision: JayDecision, _ result: StepResult) -> String {
         let target = decision.action?.title ?? decision.intent.rawValue

@@ -43,7 +43,50 @@ enum Raindrop {
         ]])
     }
 
-    private static func post(_ path: String, _ body: [[String: Any]]) {
+    // One step of a command, for its trace. `parent` is the index of the enclosing span; nil is the command itself.
+    struct Span {
+        let name: String
+        let kind: String
+        let start: Date
+        let end: Date
+        var input: String? = nil
+        var output: String? = nil
+        var parent: Int? = nil
+    }
+
+    // The command's steps as an OTLP trace. Every span carries the event's id, which is how Raindrop
+    // hangs the trace on that event (and so on its conversation); it is the attribute Raindrop's own SDKs set.
+    @MainActor
+    static func trackTrace(eventID: UUID, command: Span, steps: [Span]) {
+        guard isOn else { return }
+        let traceID = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let spanIDs = (0...steps.count).map { _ in String(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(16)) }
+        func otlp(_ span: Span, id: String, parent: String?) -> [String: Any] {
+            var attributes: [[String: Any]] = [
+                attribute("ai.telemetry.metadata.raindrop.eventId", eventID.uuidString),
+                attribute("traceloop.span.kind", span.kind),
+                attribute("traceloop.entity.name", span.name),
+                ["key": "traceloop.entity.duration_ms", "value": ["intValue": String(Int(span.end.timeIntervalSince(span.start) * 1000))]],
+            ]
+            if let input = span.input { attributes.append(attribute("traceloop.entity.input", input)) }
+            if let output = span.output { attributes.append(attribute("traceloop.entity.output", output)) }
+            var row: [String: Any] = ["traceId": traceID, "spanId": id, "name": span.name, "kind": 1,
+                                      "startTimeUnixNano": nanoseconds(span.start), "endTimeUnixNano": nanoseconds(span.end),
+                                      "attributes": attributes]
+            if let parent { row["parentSpanId"] = parent }
+            return row
+        }
+        let rows = [otlp(command, id: spanIDs[0], parent: nil)]
+            + steps.enumerated().map { index, step in otlp(step, id: spanIDs[index + 1], parent: spanIDs[(step.parent ?? -1) + 1]) }
+        post("traces", ["resourceSpans": [["resource": ["attributes": [attribute("service.name", "bisprblow-jay")]],
+                                           "scopeSpans": [["scope": ["name": "jay"], "spans": rows]]]]])
+    }
+
+    private static func attribute(_ key: String, _ value: String) -> [String: Any] { ["key": key, "value": ["stringValue": value]] }
+
+    private static func nanoseconds(_ date: Date) -> String { String(UInt64(date.timeIntervalSince1970 * 1_000_000_000)) }
+
+    private static func post(_ path: String, _ body: Any) {
         guard let key = writeKey() else {
             logLine("raindrop skipped path=\(path) reason=no write key")
             return
